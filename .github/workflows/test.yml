@@ -15,5 +15,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
+      - name: Install launcher test shell
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes zsh
       - name: Run unit and integration simulations
         run: python -m unittest discover -s tests -q
