@@ -1,0 +1,101 @@
+{
+  "expected_username": "waterbomb_official",
+  "post_url": "https://www.instagram.com/reel/DfCKxEYlZVv/",
+  "api_version": "v26.0",
+  "account_id": "17841401245057628",
+  "default_account": "waterbomb_official",
+  "accounts": {
+    "waterbomb_busan_official": {
+      "account_id": "17841411527874641",
+      "enabled": true,
+      "meta_credential": "primary",
+      "verified_at": "2026-11-06T09:23:37.237047+00:00"
+    },
+    "waterbomb_sokcho_official": {
+      "account_id": "17841455831114060",
+      "enabled": true,
+      "meta_credential": "primary",
+      "verified_at": "2026-11-06T09:23:37.237047+00:00"
+    }
+  },
+  "collection": {
+    "mode": "account",
+    "lookback_days": 7,
+    "media_scope": "recent_posts",
+    "discovery_pages": 1,
+    "workers": 3,
+    "old_post_tracking": "separate_activity_watchlist",
+    "timezone": "Asia/Seoul",
+    "anchor_hour": 8
+  },
+  "google_sheets": {
+    "owner_email": "syan@madeone.kr",
+    "spreadsheet_id": "184SNRc-z2MfVKcsaKeZcR9kMrYBv1l5Y8JlswXs6210"
+  },
+  "notion": {
+    "daily_merge": {
+      "enabled": true,
+      "apply": true,
+      "preserve_child_databases": true,
+      "allow_template_toggle_buttons": true,
+      "token_secret": "projects/waterbomb-sns-pipeline/secrets/sns-notion-wsh-token",
+      "expected_connection_name": "WSH",
+      "template_sections": [
+        "TOP 3",
+        "Meeting",
+        "Develop",
+        "Contents schedule",
+        "Info",
+        "SNS Comments",
+        "Notices (Individual Schedules)"
+      ],
+      "lookback_days": 14,
+      "lookahead_days": 35
+    },
+    "auth_mode": "mcp_oauth",
+    "rules_page_id": "4050761a-512d-81cd-95a0-c42269a38744",
+    "daily_database_page_id": "5e61df12-8816-4eb9-8b3c-186a7ba7ae83",
+    "daily_data_source_id": "74e519dd-0028-4fc0-8dad-f3169636b767",
+    "daily_date_property": "이벤트 시간",
+    "daily_type": "오늘 업무",
+    "section_title": "SNS Comments",
+    "regional_report": true,
+    "report_instructions_page_id": "4130761a-512d-8150-9362-ffc4b4a8de68",
+    "verify_report_guidelines": true
+  },
+  "cloud": {
+    "scheduled_accounts": [
+      "waterbomb_busan_official",
+      "waterbomb_sokcho_official",
+      "waterbomb_official"
+    ],
+    "project_id": "waterbomb-sns-pipeline",
+    "account": "syan@madeone.kr",
+    "region": "asia-northeast3",
+    "ai_model": "gemini-3.8-flash",
+    "refresh_known_tracking": true,
+    "sheets_sync_enabled": false,
+    "webhook_enabled": true,
+    "comment_written_windows": true,
+    "historical_baseline_requests": 1000,
+    "comment_history": "previous_month"
+  },
+  "workflow": {
+    "enabled": false,
+    "policy_version": "v2.0",
+    "google_sheets": {
+      "enabled": true,
+      "spreadsheet_id": "184SNRc-z2MfVKcsaKeZcR9kMrYBv1l5Y8JlswXs6210",
+      "owner_email": "syan@madeone.kr",
+      "auth_mode": "service_account",
+      "service_account": "sns-pipeline@waterbomb-sns-pipeline.iam.gserviceaccount.com"
+    },
+    "google_drive": {
+      "enabled": false
+    }
+  },
+  "connections": {
+    "enabled": true,
+    "token_secret": "projects/waterbomb-sns-pipeline/secrets/sns-meta-token"
+  }
+}

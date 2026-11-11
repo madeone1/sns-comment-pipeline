@@ -1,0 +1,9 @@
+FROM python:3.13-slim
+WORKDIR /app
+RUN pip install --no-cache-dir 'gunicorn>=23,<24'
+COPY sns_comment ./sns_comment
+COPY config.json ./config.json
+RUN useradd --uid 10002 --create-home receiver
+USER 10002
+ENV PORT=8080
+CMD ["sh", "-c", "exec gunicorn --bind :${PORT} --workers 1 --threads 8 --timeout 60 --access-logfile /dev/null 'sns_comment.webhook:create_app()'"]

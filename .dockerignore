@@ -1,0 +1,14 @@
+.local
+.git
+output
+outputs
+tests
+__pycache__
+*.command
+*.sqlite3*
+*.env
+.env*
+*.pem
+*.key
+*credentials*.json
+*.lock
