@@ -434,6 +434,24 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
             workflow_pending=projection_active and (report_status!='published' or
                 (config['workflow'].get('google_sheets',{}).get('enabled') and stages['sheets']!='반영 완료') or
                 (config['workflow'].get('google_drive',{}).get('enabled') and stages['drive']!='보관 대조 완료'))
+            mod = config.get("moderation") or {}
+            if mod.get("run_with_daily") and mod.get("mode", "dry_run") != "off":
+                try:
+                    from .moderation import VertexModerator, moderate, recent_rows
+                    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+                    if not project:
+                        raise PilotError("분류 작업의 클라우드 프로젝트가 없습니다.")
+                    rows = recent_rows(store, config["account_id"], periods[0]["start"], 100)
+                    moderator = VertexModerator(state.transport, project, config.get("cloud", {}).get("ai_model", "gemini-3.8-flash"))
+                    # Decisions live at the bucket root so the 10-minute sweep and the morning job share them.
+                    shared_state = state if not state.prefix else CloudState(state.bucket, state.transport)
+                    note = moderate(rows, shared_state, config, moderator, client=client,
+                        account_username=config["expected_username"], region=config.get("region_label"))
+                    log("moderation_daily_recorded", account=config["expected_username"], classified=note["classified"],
+                        would_hide=note["would_hide"], human_review=note["human_review"], kept=note["kept"])
+                except (PilotError, OSError, ValueError, KeyError, TypeError) as error:
+                    message = str(error) if isinstance(error, PilotError) else "당일 댓글 분류 기록을 남기지 못했습니다."
+                    log("moderation_daily_failed", severity="ERROR", account=config["expected_username"], error=message)
             log("daily_complete",date=day,account=config["expected_username"],
                 report_status=report_status,analysis_status=analysis_status,comments=context["counts"]["comments_and_replies"],api_requests=client.request_count)
             return {"status":"pending" if workflow_pending or (webhook_result and webhook_result['status'] != 'complete') or (written_mode and primary['status']!='complete') else "complete","day":day,"primary":primary,"tracking_separate":tracking,

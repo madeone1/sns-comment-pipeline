@@ -106,8 +106,10 @@ class CloudState:
         self.transport.request('DELETE', self.url(name, ifGenerationMatch=generation))
 
     @contextlib.contextmanager
-    def lease(self, seconds=3900):
-        name, owner = "state/lease.json", uuid.uuid4().hex
+    def lease(self, seconds=3900, name="state/lease.json"):
+        if not re.fullmatch(r"state/[a-z0-9-]{1,40}\.json", name):
+            raise CloudError("잠금 파일 이름을 확인해주세요")
+        owner = uuid.uuid4().hex
         current, generation = self.json_get(name, {})
         if current.get("expires_at", 0) > time.time():
             raise CloudError("다른 클라우드 실행이 진행 중입니다")

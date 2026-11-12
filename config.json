@@ -103,5 +103,15 @@
   "connections": {
     "enabled": true,
     "token_secret": "projects/waterbomb-sns-pipeline/secrets/sns-meta-token"
+  },
+  "moderation": {
+    "policy_version": "v2.3",
+    "mode": "dry_run",
+    "hide_enabled": false,
+    "run_with_daily": true,
+    "interval_minutes": 10,
+    "max_age_minutes": 20,
+    "media_limit": 8,
+    "batch_size": 20
   }
 }
