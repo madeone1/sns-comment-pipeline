@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
-import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -14,6 +13,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from sns_comment.api import NoRedirect, https_context, PilotError
+from sns_comment.gcloud_account import permission_help, resolve_operator, run_gcloud
 from sns_comment.profiles import select
 
 RELEASE = ROOT/'.local/webhook-release'
@@ -22,11 +22,24 @@ APP_ID = '1607262264749356'
 OPENER = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=https_context()))
 
 
+_operator = None
+
+
+def operator():
+    global _operator
+    if _operator is None:
+        email, explicit = resolve_operator(project=PROJECT)
+        print('Google Cloud 계정: ' + email, file=sys.stderr, flush=True)
+        _operator = (email, email if explicit else None)
+    return _operator
+
+
 def secret(name):
-    result = subprocess.run(['gcloud', 'secrets', 'versions', 'access', 'latest', '--secret='+name,
-        '--project='+PROJECT, '--account=syan@madeone.kr'], capture_output=True, text=True)
+    email, account = operator()
+    result = run_gcloud(['secrets', 'versions', 'access', 'latest', '--secret='+name],
+        project=PROJECT, account=account)
     if result.returncode:
-        raise PilotError('지정한 웹훅 비밀 읽기 실패: '+name)
+        raise PilotError(permission_help(email, PROJECT) + '\n지정한 웹훅 비밀 읽기 실패: ' + name)
     return result.stdout.strip()
 
 

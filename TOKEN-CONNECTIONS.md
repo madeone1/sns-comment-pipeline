@@ -1,6 +1,6 @@
 # 액세스 토큰 변경과 데이터 연결
 
-`change-access-token.command`를 열고 토큰을 숨김 입력한다. 별도 웹 서버를 실행하지 않는다. 회사 Google Cloud CLI 계정 `syan@madeone.kr`을 사용한다. 인증이 없으면 `gcloud auth login syan@madeone.kr`을 한 번 실행한다. 토큰을 채팅·명령 인자·환경변수 파일에 붙여 넣지 않는다.
+`change-access-token.command`를 열고 토큰을 숨김 입력한다. 별도 웹 서버를 실행하지 않는다. Google Cloud CLI에 로그인된 회사 계정을 사용한다. Secret Manager 비밀 `sns-meta-token`, 상태 버킷, Cloud Run Job `sns-comments-daily` 실행 권한이 있으면 된다. 예: `josh@madeone.kr`. 실행 시 사용 중인 계정을 먼저 보여 준다. 로그인이 없으면 `gcloud auth login`을 실행한다. 계정을 바꾸려면 `--account 이메일` 또는 환경변수 `SNS_GCLOUD_ACCOUNT`를 지정한다. `config.json`의 `cloud.account`가 비어 있으면 활성 계정을 쓰고, 이메일이 적혀 있으면 그 계정을 기본값으로만 쓴다. 플래그와 환경변수가 설정보다 우선한다. 토큰을 채팅·명령 인자·환경변수 파일에 붙여 넣지 않는다.
 
 기존 계정은 ID로 지역 표시명과 이력을 찾는다. 새 계정은 지역 표시명을 입력하며, 빈칸이면 이번 대상에서 제외한다. 이전에 제외한 계정을 다시 포함하려면 해당 계정의 지역명을 입력한다. `--region 계정ID=지역명`, `--exclude 계정ID`로도 지정할 수 있다. 검증 완료 후 바로 수집 작업을 시작하고 결과를 기다린다. 창을 닫아도 이미 시작한 클라우드 작업은 계속된다.
 

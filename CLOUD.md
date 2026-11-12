@@ -7,7 +7,7 @@
 | 항목 | 현재 설정 |
 | --- | --- |
 | 프로젝트 | `waterbomb-sns-pipeline` |
-| 담당 Google 계정 | `syan@madeone.kr` |
+| 로컬 실행 Google 계정 | 현재 활성 gcloud 계정. `sns-meta-token`·상태 버킷·수집 Job 권한이 있는 회사 계정 (예: `josh@madeone.kr`). `--account` 또는 `SNS_GCLOUD_ACCOUNT`로 지정 가능 |
 | 리전 | `asia-northeast3` |
 | 운영 작업 | `sns-comments-daily` |
 | 정기 실행 | 매일 08:00, `Asia/Seoul` |
@@ -24,9 +24,12 @@
 ## 일반 운영
 
 토큰 변경은 `change-access-token.command`만 사용한다. 토큰을 환경 파일이나
-명령 인수에 넣지 않는다. 실행 파일은 회사 Google 인증으로 HTTPS API를 호출해
-Meta 접근을 확인하고 Secret Manager와 등록부를 갱신한 뒤 Cloud Run을 시작한다.
-예약 실행은 로컬 컴퓨터가 꺼져 있어도 계속된다.
+명령 인수에 넣지 않는다. 실행 파일은 현재 활성 회사 Google 계정으로 HTTPS API를
+호출해 Meta 접근을 확인하고 Secret Manager와 등록부를 갱신한 뒤 Cloud Run을
+시작한다. 사용 계정은 토큰 입력 전에 화면에 나온다. 로그인이 없거나 권한이
+없으면 `gcloud auth login` 안내 후 종료하며 비밀 저장소는 바꾸지 않는다.
+예약 실행은 로컬 컴퓨터가 꺼져 있어도 계속된다. Cloud Run Job 자체는
+서비스 계정으로 돌며, 이 로컬 계정 선택을 쓰지 않는다.
 
 Cloud Run에는 원문 Meta 토큰 환경변수를 주입하지 않는다. 매 실행 시 저장소의
 최신 버전을 검증하고 숫자 버전으로 고정해 계정별 작업이 같은 스냅샷을 사용한다.
