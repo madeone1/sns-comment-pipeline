@@ -44,6 +44,27 @@ class ReportRecoveryTests(unittest.TestCase):
         self.assertEqual(checked.call_args.kwargs['scope'],'publication')
         self.assertTrue(any(c.args[0].endswith('publication-guidance-2026-11-09.json') for c in state.json_put.call_args_list))
 
+    def test_a_new_account_without_saved_runs_still_writes_its_first_source(self):
+        config={'expected_username':'waterbomb_toronto_official','account_id':'17841454752492067',
+                'region_label':'토론토','api_version':'v26.0','notion':{'rules_page_id':'parent'},
+                'collection':{},'cloud':{'refresh_known_tracking':False,'webhook_enabled':False},
+                'workflow':{'enabled':False,'google_sheets':{'enabled':False}}}
+        state=mock.MagicMock();state.restore_database.return_value=0;state.json_get.return_value=({},0)
+        notion=mock.Mock();notion.rules.return_value={'version':'v2.0','last_edited_at':'2026-11-10T00:00:00Z','text':'rules'}
+        notion.publish.return_value={'page_id':'page'}
+        analyzer=mock.Mock();analyzer.classify.return_value={};analyzer.report.return_value={'lines':['새 댓글 없음'],'insights':[],'actions':[]}
+        primary={'status':'complete','media_discovered':2,'api_requests':4,'last_scope_completed_at':'2026-11-11T23:10:00+00:00'}
+        with mock.patch.dict(os.environ,{'SNS_IG_ACCESS_TOKEN':'synthetic'},clear=True), \
+                mock.patch.object(cloud,'GraphClient',return_value=mock.Mock(request_count=0)), \
+                mock.patch.object(cloud,'collect_continuously',return_value=primary),contextlib.redirect_stdout(io.StringIO()):
+            result=cloud.execute(config,state,notion,analyzer,instant=dt.datetime(2026,11,12,0,tzinfo=dt.timezone.utc),lease_held=True)
+        self.assertEqual(result['status'],'complete')
+        names=[call.args[0] for call in state.json_put.call_args_list]
+        self.assertIn('runs/2026-11-12/source.json',names)
+        reports=next(call.args[1] for call in state.json_put.call_args_list if call.args[0]=='state/reports.json')
+        self.assertIn('2026-11-12',reports)
+        self.assertIn('daily',reports['2026-11-12']['sections'])
+
     def test_previous_month_scope_skips_unbounded_baseline_and_separate_old_activity(self):
         config={'expected_username':'waterbomb_official','account_id':'100','api_version':'v26.0',
                 'notion':{'rules_page_id':'parent'},'collection':{},

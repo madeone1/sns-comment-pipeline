@@ -56,6 +56,13 @@ def containers(text, kind):
 
 def region(name, content, label=None):
     from .notion_mcp import literal, root_matches
+    # A newly added account has no saved run for the verification day.
+    # Show that explicitly instead of a confirmed zero-comment report.
+    if '이전 수집 기록 없음' in content:
+        label = literal(label or LABELS.get(name, name))
+        if '수집 계정: @' not in content:
+            content += '\n\n수집 계정: @' + literal(name)
+        return '<toggle>\n' + label + ' · 수집 확인 전\n\n' + content.strip() + '\n</toggle>'
     # Earlier workflow output already folded the whole report once.
     toggles = containers(content, 'toggle')
     if len(toggles) == 1 and content.strip().startswith('<toggle>') and ' · 새 댓글 ' in toggles[0][2]:
