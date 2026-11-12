@@ -306,7 +306,7 @@ class ConfigAndSourceTests(unittest.TestCase):
             'CLOUD.md',
         ]
         for name in paths:
-            self.assertNotIn(SYAN, (ROOT / name).read_text(), name)
+            self.assertNotIn(SYAN, (ROOT / name).read_text(encoding="utf-8"), name)
 
     def test_help_mentions_the_override_without_contacting_gcloud(self):
         stdout = io.StringIO()
