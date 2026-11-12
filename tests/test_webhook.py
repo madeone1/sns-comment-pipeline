@@ -54,6 +54,9 @@ class MemoryState:
         del self.generations[name]
 
 
+TORONTO = '17841454752492067'
+
+
 def body(account=ACCOUNT, comment='30001', media='20001', text='PRIVATE TEXT'):
     return json.dumps({'object': 'instagram', 'entry': [{'id': account, 'time': 1794265200,
         'changes': [{'field': 'comments', 'value': {'id': comment, 'media': {'id': media},
@@ -83,6 +86,15 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(call(self.app, method='GET', query=query), ('200 OK', b'12345'))
         self.assertEqual(call(self.app, method='GET', query=query.replace('synthetic_verify_token', 'wrong'))[0], '403 Forbidden')
         self.assertEqual(call(self.app, method='GET', query=query, path='/')[0], '404 Not Found')
+
+    def test_toronto_is_stored_only_after_the_registry_marks_it_active(self):
+        from sns_comment.connection_registry import REGISTRY_OBJECT
+        raw = body(account=TORONTO)
+        self.assertEqual(call(self.app, raw, self.signed(raw))[0], '200 OK')
+        self.assertFalse(any(isinstance(item, dict) and item.get('account_id') == TORONTO for item in self.state.data.values()))
+        self.state.json_put(REGISTRY_OBJECT, {'accounts': {TORONTO: {'id': TORONTO, 'active': True}}}, 0)
+        self.assertEqual(call(self.app, raw, self.signed(raw))[0], '200 OK')
+        self.assertTrue(any(isinstance(item, dict) and item.get('account_id') == TORONTO for item in self.state.data.values()))
 
     def test_signature_account_and_unsupported_fields_never_enqueue(self):
         raw = body()

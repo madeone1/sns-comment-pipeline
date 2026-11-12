@@ -99,10 +99,37 @@ def list_accounts(client,previous=(),max_pages=20,max_accounts=25):
     return sorted(found.values(),key=lambda a:a['id']),routes
 
 
+def include_direct_accounts(client,accounts,routes,labels,excluded):
+    """Read an explicit account ID when page discovery does not list it.
+
+    The operator named the ID. A failed direct read stops before any secret
+    or registry write. A successful read then uses the same account, media
+    and comment checks as a listed account.
+    """
+    found={a['id']:a for a in accounts}
+    for identifier in labels:
+        if identifier in found or identifier in excluded:continue
+        if not isinstance(identifier,str) or not identifier.isdigit():
+            raise PilotError('직접 조회할 계정 ID는 숫자여야 합니다. 기존 연결은 유지합니다.')
+        try:account=checked_account(client.get(identifier,fields='id,username'))
+        except GraphError as error:
+            if error.code in (10,100,200) and error.status in (400,403):
+                raise PilotError('지정한 계정 ID '+identifier+'를 이 토큰으로 직접 조회하지 못했습니다. 기존 연결과 비밀 저장소는 유지합니다.') from None
+            raise
+        if account['id']!=identifier:raise PilotError('직접 조회한 계정 ID가 입력과 다릅니다. 기존 연결은 유지합니다.')
+        if any(other['username']==account['username'] and other['id']!=account['id'] for other in found.values()):
+            raise PilotError('직접 조회한 @아이디가 다른 계정 ID와 겹칩니다. 기존 연결을 유지합니다.')
+        found[account['id']]=account
+        routes.append({'path':'direct_account','id':account['id'],'status':'verified'})
+    if len(found)>25:raise PilotError('계정 목록이 검증 상한을 넘어 기존 대상을 유지합니다.')
+    return sorted(found.values(),key=lambda a:a['id']),routes
+
+
 def inspect_token(settings,registry,token,labels=None,exclusions=None,graph=GraphClient):
     client=graph(token,settings['api_version'],max_requests=150)
-    accounts,routes=list_accounts(client,registry['accounts'].values())
     labels=labels or {};excluded=set(exclusions or ())
+    accounts,routes=list_accounts(client,registry['accounts'].values())
+    accounts,routes=include_direct_accounts(client,accounts,routes,labels,excluded)
     known={key:a['label'] for key,a in registry['accounts'].items()}
     selected=[];unknown=[];checks=[]
     for value in accounts:

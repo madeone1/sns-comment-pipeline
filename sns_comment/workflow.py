@@ -15,7 +15,8 @@ from .sheets import HEADERS as LEGACY_HEADERS, SheetsClient, cell, column_name, 
 
 
 VERSION = "sns-workflow-v3-regional"
-LABELS = {"waterbomb_official": "대표(공식)", "waterbomb_busan_official": "부산", "waterbomb_sokcho_official": "속초"}
+LABELS = {"waterbomb_official": "대표(공식)", "waterbomb_busan_official": "부산",
+          "waterbomb_sokcho_official": "속초", "waterbomb_toronto_official": "토론토"}
 REVIEW_FRONT = ["연결 키", "지역", "원문 발췌", "선정 사유", "자동 주제", "자동 의도", "자동 감정", "담당", "처리 상태", "답변 내용", "검토 여부", "게시물 링크", "목록 상태"]
 HEADERS = {
     "한눈에 보기": ["연결 키", "지역", "새 댓글", "단순 반응", "내용 분석 대상", "판단 보류", "확인된 작성자", "검토 대상", "수집 상태", "시트 반영", "원본 기준"],

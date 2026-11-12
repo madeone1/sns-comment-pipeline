@@ -16,6 +16,11 @@
       "enabled": true,
       "meta_credential": "primary",
       "verified_at": "2026-11-06T09:23:37.237047+00:00"
+    },
+    "waterbomb_toronto_official": {
+      "account_id": "17841454752492067",
+      "enabled": true,
+      "meta_credential": "primary"
     }
   },
   "collection": {
@@ -67,7 +72,8 @@
     "scheduled_accounts": [
       "waterbomb_busan_official",
       "waterbomb_sokcho_official",
-      "waterbomb_official"
+      "waterbomb_official",
+      "waterbomb_toronto_official"
     ],
     "project_id": "waterbomb-sns-pipeline",
     "account": null,

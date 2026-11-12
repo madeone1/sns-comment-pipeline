@@ -6,7 +6,7 @@ from .api import PilotError
 
 
 LABELS = {'waterbomb_official': '대표(공식)', 'waterbomb_busan_official': '부산',
-          'waterbomb_sokcho_official': '속초'}
+          'waterbomb_sokcho_official': '속초', 'waterbomb_toronto_official': '토론토'}
 ARCHIVE='이전 수집 대상 · 이력 보존'
 
 
