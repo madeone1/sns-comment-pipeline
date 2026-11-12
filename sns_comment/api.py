@@ -115,11 +115,36 @@ class GraphClient:
                     "by_endpoint":{k:{"requests":v["requests"],"request_seconds_total":round(v["request_seconds_total"],3)}
                                    for k,v in self.request_metrics.items()}}
 
-    def _request(self,path,params):
+    def hide_comment(self, comment_id):
+        """POST hide=true only. There is no delete and no un-hide."""
+        if not isinstance(comment_id, str) or not re.fullmatch(r"[0-9]{1,30}", comment_id):
+            raise PilotError("숨길 댓글 ID 형식이 아닙니다.")
+        with self._counter_lock:
+            if self.request_count >= self.max_requests:
+                raise RequestBudgetExceeded("실행당 API 요청 상한에 도달했습니다. 저장된 원본을 유지하고 부분 실패로 종료합니다.")
+            self.request_count += 1
+            self.active_requests += 1
+            self.max_active_requests = max(self.max_active_requests, self.active_requests)
+        began = time.perf_counter()
+        try:
+            return self._request(comment_id, {"hide": "true"}, "POST")
+        finally:
+            with self._counter_lock:
+                self.active_requests -= 1
+                metric = self.request_metrics.setdefault("hide", {"requests": 0, "request_seconds_total": 0.0})
+                metric["requests"] += 1
+                metric["request_seconds_total"] += time.perf_counter() - began
+
+    def _request(self, path, params, method="GET"):
+        if method not in {"GET", "POST"}:
+            raise PilotError("허용되지 않은 API 메서드입니다.")
+        if method == "POST" and (not re.fullmatch(r"[0-9]{1,30}", path) or set(params) != {"hide"} or params.get("hide") != "true"):
+            raise PilotError("댓글은 숨김만 요청할 수 있습니다. 삭제하거나 숨김을 해제하지 않습니다.")
         request = urllib.request.Request(
             f"{self._base}/{path}?{urllib.parse.urlencode(params)}",
+            data=b"" if method == "POST" else None,
             headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"},
-            method="GET",
+            method=method,
         )
         try:
             if self._custom_opener is not None or threading.current_thread() is threading.main_thread():
