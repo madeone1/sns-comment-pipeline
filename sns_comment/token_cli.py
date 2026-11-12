@@ -33,6 +33,17 @@ class LocalTransport(GoogleTransport):
         return self._token
 
 
+def configure_stdio():
+    """Show Korean errors as UTF-8, including when cmd pipes the console."""
+    for stream in (sys.stdout,sys.stderr):
+        reconfigure=getattr(stream,'reconfigure',None)
+        if reconfigure is None:continue
+        encoding=(getattr(stream,'encoding',None) or '').lower().replace('-','')
+        if encoding=='utf8':continue
+        try:reconfigure(encoding='utf-8',errors='replace')
+        except (OSError,ValueError):pass
+
+
 def display(plan):
     print('\n이번 토큰의 수집 대상',flush=True)
     for account in plan['accounts']:print('  '+account['label']+' · @'+account['username']+' · '+account['id'])
@@ -88,6 +99,7 @@ def wait_for_delivery(transport,state,execution,region,revision,timeout=3600):
 
 
 def main(argv=None):
+    configure_stdio()
     parser=argparse.ArgumentParser(description='액세스 토큰 검증 → 계정·지역 연결 → 시트·노션 갱신')
     parser.add_argument('--config');parser.add_argument('--check',action='store_true',help='현재 저장 토큰을 검증, 저장·수집 실행 없음')
     parser.add_argument('--account',help='Google Cloud 계정(이메일). 없으면 SNS_GCLOUD_ACCOUNT, 그다음 cloud.account, 없으면 현재 활성 계정')

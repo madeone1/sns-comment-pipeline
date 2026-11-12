@@ -2,6 +2,7 @@
 
 import ast
 import errno
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -9,6 +10,8 @@ import unittest
 from unittest import mock
 
 from sns_comment.api import PilotError
+from sns_comment import regional_notion, workflow
+from sns_comment.connection_registry import initial_registry
 from sns_comment.gcloud_account import gcloud_command, quote_windows_arg, run_gcloud, windows_batch_command
 from sns_comment.profiles import read_settings
 from sns_comment.storage import run_lock
@@ -17,6 +20,36 @@ import sns_comment.token_cli as token_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 GCLOUD_CMD = r'C:\Users\기\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd'
+
+
+class TorontoConfigTests(unittest.TestCase):
+    def test_shipped_settings_schedule_toronto_with_the_same_region_label(self):
+        settings = read_settings()
+        toronto = '17841454752492067'
+        self.assertEqual(settings['accounts']['waterbomb_toronto_official']['account_id'], toronto)
+        self.assertIn('waterbomb_toronto_official', settings['cloud']['scheduled_accounts'])
+        account = initial_registry(settings)['accounts'][toronto]
+        self.assertEqual(account['username'], 'waterbomb_toronto_official')
+        self.assertEqual(account['label'], '토론토')
+        self.assertTrue(account['active'])
+        self.assertEqual(workflow.LABELS['waterbomb_toronto_official'], '토론토')
+        self.assertEqual(regional_notion.LABELS['waterbomb_toronto_official'], '토론토')
+        self.assertEqual(workflow.region_tab('waterbomb_toronto_official', '토론토'), '토론토')
+
+    def test_korean_errors_are_reconfigured_to_utf8(self):
+        class Stream(io.StringIO):
+            encoding = 'cp949'
+
+            def reconfigure(self, **kwargs):
+                self.encoding = kwargs['encoding']
+                self.recorded = kwargs['errors']
+
+        stdout, stderr = Stream(), Stream()
+        with mock.patch.object(token_cli.sys, 'stdout', stdout), mock.patch.object(token_cli.sys, 'stderr', stderr):
+            token_cli.configure_stdio()
+        self.assertEqual(stdout.encoding, 'utf-8')
+        self.assertEqual(stderr.encoding, 'utf-8')
+        self.assertEqual(stdout.recorded, 'replace')
 
 
 class TokenCliImportTests(unittest.TestCase):

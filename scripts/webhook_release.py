@@ -15,7 +15,7 @@ RELEASE = ROOT/'.local/webhook-release'
 
 
 def prepare(config):
-    settings = json.loads(Path(config).read_text())
+    settings = json.loads(Path(config).read_text(encoding="utf-8"))
     if settings.get('cloud', {}).get('project_id') != PROJECT:
         raise SystemExit('기존 운영 설정을 지정해주세요.')
     baseline = json.loads(json.dumps(settings))
@@ -26,7 +26,7 @@ def prepare(config):
         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     for name in ('Dockerfile', 'Dockerfile.webhook', '.dockerignore', '.gcloudignore'):
         shutil.copy2(ROOT/name, folder/name)
-    (folder/'config.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2)+'\n')
+    (folder/'config.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2)+'\n', encoding="utf-8")
     recovered = json.loads(json.dumps(settings))
     if 'webhook_enabled' in baseline['cloud']:
         recovered['cloud']['webhook_enabled'] = baseline['cloud']['webhook_enabled']
@@ -41,12 +41,12 @@ def prepare(config):
     steps = [{'name': 'gcr.io/cloud-builders/docker', 'args': ['build', '-f', dockerfile, '-t', images[kind], '.']}
         for kind, dockerfile in [('receiver', 'Dockerfile.webhook'), ('worker', 'Dockerfile')]]
     (RELEASE/'cloudbuild.json').write_text(json.dumps({'steps': steps, 'images': list(images.values()),
-        'options': {'logging': 'GCS_ONLY'}}, indent=2))
+        'options': {'logging': 'GCS_ONLY'}}, indent=2), encoding="utf-8")
     manifest = {'project': PROJECT, 'region': REGION, 'service': 'sns-comments-webhook', 'images': images,
         'config_source': str(Path(config).resolve()), 'config_change': 'cloud.webhook_enabled=true only',
         'source_hashes': {str(p.relative_to(folder)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(folder.rglob('*')) if p.is_file()}}
-    (RELEASE/'release.json').write_text(json.dumps(manifest, indent=2))
+    (RELEASE/'release.json').write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     bucket = PROJECT+'-state'
     prefix = 'projects/_/buckets/'+bucket+'/objects/'
     identity = 'serviceAccount:sns-webhook@'+PROJECT+'.iam.gserviceaccount.com'
@@ -72,7 +72,7 @@ def prepare(config):
             'current_callback': 'empty, visually verified 2026-11-10', 'field': 'comments',
             'required_before_subscription': 'Confirm production token app ID, login route and account asset access; no subscription written.'},
         'hosted_management_required': False}
-    (RELEASE/'permission-plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2))
+    (RELEASE/'permission-plan.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({'release': str(RELEASE), 'images': images, 'config_preserved': True,
         'permission_plan': str(RELEASE/'permission-plan.json')}, ensure_ascii=False, indent=2))
 
@@ -82,18 +82,18 @@ def build():
         '--service-account=projects/'+PROJECT+'/serviceAccounts/sns-build@'+PROJECT+'.iam.gserviceaccount.com',
         '--gcs-log-dir=gs://'+PROJECT+'-build/logs', '--gcs-source-staging-dir=gs://'+PROJECT+'-build/source',
         '--async', '--format=json']).stdout)
-    (RELEASE/'build.json').write_text(json.dumps(info, indent=2))
+    (RELEASE/'build.json').write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(json.dumps({'id': info['id'], 'status': info['status']}))
 
 
 def configure():
     """Apply only the four scopes explicitly approved in the chat."""
-    plan = json.loads((RELEASE/'permission-plan.json').read_text())
+    plan = json.loads((RELEASE/'permission-plan.json').read_text(encoding="utf-8"))
     if not (RELEASE/'bucket-iam-before.json').exists():
         (RELEASE/'bucket-iam-before.json').write_text(gcloud(['storage', 'buckets', 'get-iam-policy',
-            'gs://'+PROJECT+'-state', '--format=json']).stdout)
+            'gs://'+PROJECT+'-state', '--format=json']).stdout, encoding="utf-8")
     if not (RELEASE/'log-sinks-before.json').exists():
-        (RELEASE/'log-sinks-before.json').write_text(gcloud(['logging', 'sinks', 'list', '--format=json']).stdout)
+        (RELEASE/'log-sinks-before.json').write_text(gcloud(['logging', 'sinks', 'list', '--format=json']).stdout, encoding="utf-8")
     identity = 'sns-webhook@'+PROJECT+'.iam.gserviceaccount.com'
     if gcloud(['iam', 'service-accounts', 'describe', identity], optional=True).returncode:
         gcloud(['iam', 'service-accounts', 'create', 'sns-webhook', '--display-name=SNS comment webhook receiver'])
@@ -124,13 +124,13 @@ def configure():
 
 
 def deploy_worker():
-    manifest = json.loads((RELEASE/'release.json').read_text())
-    build_id = json.loads((RELEASE/'build.json').read_text())['id']
+    manifest = json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))
+    build_id = json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
     if gcloud(['builds', 'describe', build_id, '--format=value(status)']).stdout.strip() != 'SUCCESS':
         raise SystemExit('검증된 빌드가 완료되지 않았습니다.')
     before = json.loads(gcloud(['run', 'jobs', 'describe', 'sns-comments-daily', '--region='+REGION, '--format=json']).stdout)
     if not (RELEASE/'job-before.json').exists():
-        (RELEASE/'job-before.json').write_text(json.dumps(before, indent=2))
+        (RELEASE/'job-before.json').write_text(json.dumps(before, indent=2), encoding="utf-8")
     gcloud(['run', 'jobs', 'update', 'sns-comments-daily', '--region='+REGION, '--image='+manifest['images']['worker']])
     after = json.loads(gcloud(['run', 'jobs', 'describe', 'sns-comments-daily', '--region='+REGION, '--format=json']).stdout)
     expected = before['spec']['template']['spec']['template']['spec']
@@ -138,12 +138,12 @@ def deploy_worker():
     expected['containers'][0]['image'] = manifest['images']['worker']
     if expected != observed:
         raise SystemExit('이미지 외 작업 설정이 달라졌습니다. 실행하지 말고 구성을 대조해주세요.')
-    (RELEASE/'job-after.json').write_text(json.dumps(after, indent=2))
+    (RELEASE/'job-after.json').write_text(json.dumps(after, indent=2), encoding="utf-8")
     print(json.dumps({'worker_updated': True, 'image_only_verified': True, 'executed': False}))
 
 
 def deploy_receiver():
-    manifest = json.loads((RELEASE/'release.json').read_text())
+    manifest = json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))
     versions = gcloud(['secrets', 'versions', 'list', 'sns-meta-app-secret', '--filter=state=ENABLED',
         '--limit=1', '--format=value(name)']).stdout.strip()
     if not versions:
@@ -155,10 +155,10 @@ def deploy_receiver():
         '--set-env-vars=SNS_STATE_BUCKET='+PROJECT+'-state',
         '--set-secrets=SNS_META_APP_SECRET=sns-meta-app-secret:latest,SNS_WEBHOOK_VERIFY_TOKEN=sns-webhook-verify-token:latest'])
     service = json.loads(gcloud(['run', 'services', 'describe', 'sns-comments-webhook', '--region='+REGION, '--format=json']).stdout)
-    (RELEASE/'receiver-service.json').write_text(json.dumps(service, indent=2))
+    (RELEASE/'receiver-service.json').write_text(json.dumps(service, indent=2), encoding="utf-8")
     result = {'service': 'sns-comments-webhook', 'url': service['status']['url'],
         'callback_url': service['status']['url']+'/webhooks/instagram', 'receiver_deployed': True, 'meta_registered': False}
-    (RELEASE/'deployment.json').write_text(json.dumps(result, indent=2))
+    (RELEASE/'deployment.json').write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result))
 
 

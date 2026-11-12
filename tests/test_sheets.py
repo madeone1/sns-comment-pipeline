@@ -147,7 +147,7 @@ class SheetsTests(unittest.TestCase):
         self.remote.fail_after_write = True
         with self.assertRaises(PilotError):
             sync(self.source, self.remote, self.state)
-        self.assertEqual(json.loads(self.state.read_text())["status"], "pending")
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["status"], "pending")
         result = sync(self.source, self.remote, self.state)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(self.remote.writes, 1)
@@ -158,7 +158,7 @@ class SheetsTests(unittest.TestCase):
         self.remote.rows["댓글 원본"][0] = ["invalid"]
         with self.assertRaises(PilotError):
             sync(self.source, self.remote, self.state)
-        self.assertEqual(json.loads(self.state.read_text())["last_success_at"], successful["last_success_at"])
+        self.assertEqual(json.loads(self.state.read_text(encoding="utf-8"))["last_success_at"], successful["last_success_at"])
 
     def test_dry_run_does_not_write_remote_or_create_state(self):
         result = sync(self.source, self.remote, self.state, dry_run=True)
@@ -285,7 +285,7 @@ class SheetsTests(unittest.TestCase):
         self.remote.fail_on_write = 2
         with self.assertRaises(PilotError):
             sync(source, self.remote, self.state)
-        state = json.loads(self.state.read_text())
+        state = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertEqual(state["batches_completed"], 1)
         self.assertEqual(state["status"], "pending")
         result = sync(source, self.remote, self.state)
@@ -332,9 +332,9 @@ class SheetsTests(unittest.TestCase):
         self.remote.rows["분류와 처리"][1][20] = ""
         sync(self.source, self.remote, self.state)
         self.assertEqual(self.remote.rows["분류와 처리"][1][20], "")
-        legacy_state = json.loads(self.state.read_text())
+        legacy_state = json.loads(self.state.read_text(encoding="utf-8"))
         legacy_state.pop("review_context_initialized")
-        self.state.write_text(json.dumps(legacy_state))
+        self.state.write_text(json.dumps(legacy_state), encoding="utf-8")
         sync(self.source, self.remote, self.state)
         self.assertTrue(self.remote.rows["분류와 처리"][1][20].startswith("분류 전 원문 발췌"))
 

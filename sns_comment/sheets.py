@@ -482,7 +482,7 @@ def sync(source, client, state_path, dry_run=False, max_batches=MAX_BATCHES_PER_
     if not isinstance(max_batches, int) or isinstance(max_batches, bool) or max_batches < 1:
         raise PilotError("실행당 시트 배치 수는 1 이상의 정수여야 합니다.")
     with run_lock(state_path):
-        previous = json.loads(state_path.read_text()) if state_path.exists() else {}
+        previous = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
         seed_context = not previous.get("review_context_initialized", False)
         state = {"status": "pending", "started_at": now(), "source_digest": source["source_digest"],
                  "last_success_at": previous.get("last_success_at"), "coverage": source.get("coverage", {}),
@@ -490,7 +490,7 @@ def sync(source, client, state_path, dry_run=False, max_batches=MAX_BATCHES_PER_
         def save():
             state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = state_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             os.chmod(temporary, 0o600)
             temporary.replace(state_path)
         if not dry_run:

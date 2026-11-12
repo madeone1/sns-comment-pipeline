@@ -30,7 +30,7 @@ DAY='2026-11-10'
 def reproject(apply=False):
     os.umask(0o077)
     HERE.mkdir(parents=True,exist_ok=True)
-    settings=json.loads((ROOT/'.local/web-release/operational-config.json').read_text())
+    settings=json.loads((ROOT/'.local/web-release/operational-config.json').read_text(encoding="utf-8"))
     instant=dt.datetime.fromisoformat(DAY+'T08:00:00+09:00')
     start,end=collection_window(instant=instant)
     floor=previous_month_start(end)
@@ -78,9 +78,9 @@ def reproject(apply=False):
                 'media_age_restricted':True,'media_since':floor,'collection_coverage':collection['coverage'],
                 'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),
                 'reprojection':{'reason':'user_selected_previous_calendar_month','previous_generation':generation}}
-            (HERE/(name+'-source-before.json')).write_text(json.dumps(old,ensure_ascii=False,indent=2))
-            (HERE/(name+'-source.json')).write_text(json.dumps(source,ensure_ascii=False,indent=2))
-            (HERE/(name+'-analysis-before.json')).write_text(json.dumps(analysis,ensure_ascii=False,indent=2))
+            (HERE/(name+'-source-before.json')).write_text(json.dumps(old,ensure_ascii=False,indent=2), encoding="utf-8")
+            (HERE/(name+'-source.json')).write_text(json.dumps(source,ensure_ascii=False,indent=2), encoding="utf-8")
+            (HERE/(name+'-analysis-before.json')).write_text(json.dumps(analysis,ensure_ascii=False,indent=2), encoding="utf-8")
             result={'account':name,'posts':len(targets),'daily':len(views[0]['comments']),'week':len(week['comments']),
                 'proof':proof,'applied':False}
             if apply:
@@ -94,7 +94,7 @@ def reproject(apply=False):
                 result['applied']=True
             results.append(result)
             print(json.dumps(result,ensure_ascii=False),flush=True)
-    (HERE/('applied.json' if apply else 'audit.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2))
+    (HERE/('applied.json' if apply else 'audit.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2), encoding="utf-8")
 
 
 if __name__=='__main__':

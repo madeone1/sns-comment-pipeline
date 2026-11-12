@@ -337,7 +337,7 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                 if active:
                     # The account remains owned by publish()'s stable callout;
                     # compact regional content is folded inside that boundary.
-                    label={'waterbomb_official':'대표(공식)','waterbomb_busan_official':'부산','waterbomb_sokcho_official':'속초'}.get(config['expected_username'],config['expected_username'])
+                    label=workflow.LABELS.get(config['expected_username'],config['expected_username'])
                     details=sections[:3]+[sections[-1]]
                     summary=[block('bulleted_list_item',line) for line in report['lines']]
                     sections=[block('toggle',f"{label} · 새 댓글 {view['counts']['comments_and_replies']}건",children=summary+details)]

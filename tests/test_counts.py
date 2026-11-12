@@ -98,9 +98,9 @@ class CounterTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as output:
             path = Path(folder) / "counts.json"
             self.assertEqual(main(["--output", str(path)]), 0)
-            result = json.loads(path.read_text())
+            result = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(result["total_comments_count"], 107)
-            self.assertNotIn("synthetic-secret", path.read_text() + output.getvalue())
+            self.assertNotIn("synthetic-secret", path.read_text(encoding="utf-8") + output.getvalue())
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 

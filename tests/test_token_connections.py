@@ -165,5 +165,39 @@ class TokenConnectionTests(unittest.TestCase):
             failed=[{'account':configs[0]['expected_username'],'status':'failed'}]
             self.assertEqual(core.verify_delivery(shared,configs,'day','pending',failed)['status'],'sync_pending')
 
+    def test_an_explicit_region_id_missing_from_the_page_list_is_read_directly(self):
+        toronto='17841454752492067'
+        class Direct(Graph):
+            def get(self,path,**params):
+                if path==toronto:
+                    self.request_count+=1
+                    return {'id':toronto,'username':'waterbomb_toronto_official'}
+                return super().get(path,**params)
+        plan=core.inspect_token(self.settings,self.registry,'abc',labels={toronto:'토론토'},graph=Direct)
+        self.assertEqual(plan['status'],'verified')
+        row=next(a for a in plan['accounts'] if a['id']==toronto)
+        self.assertEqual((row['username'],row['label']),('waterbomb_toronto_official','토론토'))
+        self.assertIn(toronto,plan['changes']['added'])
+        self.assertEqual({a['id'] for a in plan['accounts'] if a['id']!='10004'},{'10001','10002','10003',toronto})
+        self.assertTrue(any(r.get('path')=='direct_account' and r.get('id')==toronto for r in plan['routes']))
+        check=next(c for c in plan['checks'] if c['id']==toronto)
+        self.assertEqual((check['account'],check['media'],check['comments']),(True,True,True))
+        untouched=core.inspect_token(self.settings,self.registry,'abc',graph=Direct)
+        self.assertNotIn(toronto,{a['id'] for a in untouched['available']})
+
+    def test_a_direct_region_id_the_token_cannot_read_does_not_change_the_plan(self):
+        toronto='17841454752492067'
+        class Denied(Graph):
+            def get(self,path,**params):
+                if path==toronto:raise GraphError(400,100)
+                return super().get(path,**params)
+        before=copy.deepcopy(self.registry)
+        with self.assertRaises(PilotError) as caught:
+            core.inspect_token(self.settings,self.registry,'abc',labels={toronto:'토론토'},graph=Denied)
+        self.assertIn('직접 조회하지 못했습니다',str(caught.exception))
+        self.assertIn(toronto,str(caught.exception))
+        self.assertNotIn('abc',str(caught.exception))
+        self.assertEqual(self.registry,before)
+
 
 if __name__=='__main__':unittest.main()

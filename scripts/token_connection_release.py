@@ -11,12 +11,12 @@ RELEASE=ROOT/'.local/token-connection-release'
 
 
 def save(name,value):
-    (RELEASE/(name+'.json')).write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
+    (RELEASE/(name+'.json')).write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n', encoding="utf-8")
 
 
 def prepare(config=ROOT/'config.json'):
     RELEASE.mkdir(parents=True,exist_ok=True)
-    settings=json.loads(config.read_text())
+    settings=json.loads(config.read_text(encoding="utf-8"))
     assert settings['workflow']['enabled'] is False and settings['workflow']['google_sheets']['enabled'] is True
     assert settings['notion']['verify_report_guidelines'] is True
     settings['connections']={'enabled':True,'token_secret':'projects/'+PROJECT+'/secrets/sns-meta-token'}
@@ -25,7 +25,7 @@ def prepare(config=ROOT/'config.json'):
     folder.mkdir()
     shutil.copytree(ROOT/'sns_comment',folder/'sns_comment',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     for name in ('Dockerfile','.dockerignore','.gcloudignore'):shutil.copy2(ROOT/name,folder/name)
-    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n')
+    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n', encoding="utf-8")
     tag=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')+'-token-connections'
     image=f'{REGION}-docker.pkg.dev/{PROJECT}/containers/sns-comments:{tag}'
     save('release',{'image':image,'source_hashes':{str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file()},
@@ -49,8 +49,8 @@ def verify(day,page):
     dt.date.fromisoformat(day)
     import re
     if not re.fullmatch(r'[a-fA-F0-9-]{32,36}',page):raise SystemExit('Notion 페이지 ID를 확인해주세요.')
-    image=json.loads((RELEASE/'release.json').read_text())['image']
-    build_id=json.loads((RELEASE/'build.json').read_text())['id']
+    image=json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))['image']
+    build_id=json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
     if gcloud(['builds','describe',build_id,'--format=value(status)']).stdout.strip()!='SUCCESS':
         raise SystemExit('빌드가 완료된 뒤 검증해주세요.')
     job='sns-token-check-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')
@@ -74,11 +74,11 @@ def verify(day,page):
 
 
 def deploy():
-    image=json.loads((RELEASE/'release.json').read_text())['image']
-    build_id=json.loads((RELEASE/'build.json').read_text())['id']
+    image=json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))['image']
+    build_id=json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
     if gcloud(['builds','describe',build_id,'--format=value(status)']).stdout.strip()!='SUCCESS':
         raise SystemExit('성공한 빌드가 필요합니다.')
-    verified=json.loads((RELEASE/'candidate-result.json').read_text())
+    verified=json.loads((RELEASE/'candidate-result.json').read_text(encoding="utf-8"))
     if verified.get('status')!='verified' or verified.get('image')!=image:
         raise SystemExit('같은 후보 이미지의 성공한 검증 증빙이 필요합니다.')
     before=json.loads(gcloud(['run','jobs','describe','sns-comments-daily','--region='+REGION,'--format=json']).stdout)

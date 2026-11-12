@@ -157,7 +157,7 @@ def main(argv=None):
             source = read_source(args.db, config, as_of=as_of)
             if args.action == "export":
                 args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                args.output.write_text(json.dumps(source, ensure_ascii=False, indent=2) + "\n")
+                args.output.write_text(json.dumps(source, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 os.chmod(args.output, 0o600)
                 emit({"status": "exported_locally", "output": str(args.output),
                       "rows": {name: len(rows) - 1 for name, rows in source["tabs"].items()},

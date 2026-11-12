@@ -42,7 +42,7 @@ class ProfileTests(unittest.TestCase):
         self.temp.cleanup()
 
     def save(self):
-        self.path.write_text(json.dumps(self.settings))
+        self.path.write_text(json.dumps(self.settings), encoding="utf-8")
 
     def cli(self, *args):
         output, errors = io.StringIO(), io.StringIO()
@@ -211,7 +211,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(len(report["accounts"]), 3)
         save.assert_not_called()
         self.assertEqual(self.path.read_bytes(), before)
-        self.assertNotIn(TOKEN, (self.root / ".local/account-connection.json").read_text())
+        self.assertNotIn(TOKEN, (self.root / ".local/account-connection.json").read_text(encoding="utf-8"))
 
     def test_unsupported_account_error_names_account_stage_and_preserves_token(self):
         before = self.path.read_bytes()
@@ -227,11 +227,11 @@ class ProfileTests(unittest.TestCase):
         save.assert_not_called()
         self.assertEqual(self.path.read_bytes(), before)
         path = self.root / ".local/account-connection.json"
-        result = json.loads(path.read_text())
+        result = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(result["failed_account"], "waterbomb_official")
         self.assertEqual(result["code"], 100)
         self.assertFalse(result["token_replaced"])
-        self.assertNotIn(TOKEN, path.read_text() + output + error)
+        self.assertNotIn(TOKEN, path.read_text(encoding="utf-8") + output + error)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_later_account_failure_reports_earlier_verification_without_enabling(self):
@@ -243,7 +243,7 @@ class ProfileTests(unittest.TestCase):
             code, _, error = self.cli("accounts", "connect", "--credential", "primary")
         self.assertEqual(code, 1)
         self.assertIn("@" + SOKCHO, error)
-        report = json.loads((self.root / ".local/account-connection.json").read_text())
+        report = json.loads((self.root / ".local/account-connection.json").read_text(encoding="utf-8"))
         self.assertEqual([row["username"] for row in report["verified_accounts"]], ["waterbomb_official", BUSAN])
         save.assert_not_called()
         self.assertEqual(self.path.read_bytes(), before)
@@ -266,7 +266,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(json.loads(output)["accounts"]), 3)
         self.assertTrue(all(p["enabled"] for p in profiles.read_settings(self.path)["accounts"].values()))
-        self.assertNotIn(TOKEN, self.path.read_text())
+        self.assertNotIn(TOKEN, self.path.read_text(encoding="utf-8"))
 
     def test_system_user_without_account_listing_can_verify_explicit_numeric_ids(self):
         for profile in self.settings["accounts"].values():

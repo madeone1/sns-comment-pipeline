@@ -90,24 +90,24 @@ class InstagramLoginTests(unittest.TestCase):
     def test_account_specific_token_is_saved_only_under_verified_instagram_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "config.json"
-            path.write_text(json.dumps(SETTINGS))
+            path.write_text(json.dumps(SETTINGS), encoding="utf-8")
             client = mock.Mock(api_host="graph.instagram.com")
             client.get.return_value = {"user_id": "100", "username": BUSAN}
             code, save, output, _ = self.run_connect(path, client)
             self.assertEqual(code, 0)
             self.assertEqual(save.call_args.kwargs["keychain_account"], BUSAN)
-            config = json.loads(path.read_text())
+            config = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(config["account_id"], "10")
             self.assertEqual(config["accounts"][BUSAN]["account_id"], "100")
             self.assertTrue(config["accounts"][BUSAN]["enabled"])
             self.assertFalse(config["accounts"][SOKCHO]["enabled"])
             self.assertFalse(json.loads(output)["comments_collected"])
-            self.assertNotIn(TOKEN, path.read_text())
+            self.assertNotIn(TOKEN, path.read_text(encoding="utf-8"))
 
     def test_token_for_another_instagram_account_does_not_replace_credentials_or_settings(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "config.json"
-            path.write_text(json.dumps(SETTINGS))
+            path.write_text(json.dumps(SETTINGS), encoding="utf-8")
             before = path.read_bytes()
             client = mock.Mock(api_host="graph.instagram.com")
             client.get.return_value = {"user_id": "10", "username": "waterbomb_official"}
@@ -116,13 +116,13 @@ class InstagramLoginTests(unittest.TestCase):
             save.assert_not_called()
             self.assertIn("해당 계정 행에서 생성한 토큰", error)
             self.assertEqual(path.read_bytes(), before)
-            report = json.loads((path.parent / ".local/account-connection.json").read_text())
+            report = json.loads((path.parent / ".local/account-connection.json").read_text(encoding="utf-8"))
             self.assertEqual(report["api_host"], "graph.instagram.com")
 
     def test_instagram_api_error_records_correct_host_and_preserves_existing_settings(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "config.json"
-            path.write_text(json.dumps(SETTINGS))
+            path.write_text(json.dumps(SETTINGS), encoding="utf-8")
             before = path.read_bytes()
             client = mock.Mock(api_host="graph.instagram.com")
             client.get.side_effect = GraphError(400, 100, 33)
@@ -135,7 +135,7 @@ class InstagramLoginTests(unittest.TestCase):
     def test_finder_wizard_requests_two_independent_tokens_and_leaves_official_alone(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "config.json"
-            path.write_text(json.dumps(SETTINGS))
+            path.write_text(json.dumps(SETTINGS), encoding="utf-8")
             with mock.patch.object(connect_accounts, "cli", return_value=0) as cli, \
                     mock.patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(connect_accounts.main(["--config", str(path)]), 0)

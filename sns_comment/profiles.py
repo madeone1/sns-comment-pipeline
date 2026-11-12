@@ -42,7 +42,7 @@ def credential_key(profile, name, primary=None):
 
 def read_settings(path=None):
     try:
-        value = json.loads(Path(path or ROOT / "config.json").read_text())
+        value = json.loads(Path(path or ROOT / "config.json").read_text(encoding="utf-8"))
         validate(value)
         return value
     except OSError:
@@ -171,7 +171,7 @@ def write_settings(path, settings):
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix=".accounts-", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(settings, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
         os.replace(temporary, path)
@@ -197,7 +197,7 @@ def save_connection_result(config_path, result):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, temporary = tempfile.mkstemp(prefix=".connection-", suffix=".tmp", dir=directory)
         try:
-            with os.fdopen(fd, "w") as stream:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(result, stream, ensure_ascii=False, indent=2)
                 stream.write("\n")
             os.replace(temporary, directory / "account-connection.json")

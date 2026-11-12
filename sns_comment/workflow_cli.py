@@ -16,9 +16,9 @@ def build(root, settings, stages=None):
     for name in settings['cloud']['scheduled_accounts']:
         config=select(settings,name)
         folder=Path(root)/name
-        source=json.loads((folder/'source.json').read_text())
+        source=json.loads((folder/'source.json').read_text(encoding="utf-8"))
         saved=folder/'daily-analysis.json'
-        annotations=json.loads(saved.read_text()).get('annotations',{}) if saved.exists() else {}
+        annotations=json.loads(saved.read_text(encoding="utf-8")).get('annotations',{}) if saved.exists() else {}
         accounts.append(workflow.make_account(config,source,annotations,stages))
     return workflow.merge(accounts)
 
@@ -34,17 +34,17 @@ def main(argv=None):
     parser.add_argument('--dry-run',action='store_true')
     args=parser.parse_args(argv)
     settings=read_settings(args.config)
-    source=json.loads(args.projection.read_text()) if args.projection else build(args.source_root,settings,
+    source=json.loads(args.projection.read_text(encoding="utf-8")) if args.projection else build(args.source_root,settings,
         {'sheets':'저장 자료 기준 초기 반영','connection':'자동 갱신 배포·인증 검증 전'})
     workflow.validate_projection(source)
     headers=source['headers']
     args.output.parent.mkdir(parents=True,exist_ok=True)
-    args.output.write_text(json.dumps(source,ensure_ascii=False,indent=2))
+    args.output.write_text(json.dumps(source,ensure_ascii=False,indent=2), encoding="utf-8")
     if args.action=='sync':
         target=settings['workflow']['google_sheets']
         client=workflow.Client(access_token(target),target['spreadsheet_id'],headers=headers)
         checkpoint=args.output.with_suffix('.sync.json')
-        result=workflow.sync(source,client,lambda value:checkpoint.write_text(json.dumps(value,ensure_ascii=False,indent=2)),args.dry_run)
+        result=workflow.sync(source,client,lambda value:checkpoint.write_text(json.dumps(value,ensure_ascii=False,indent=2), encoding="utf-8"),args.dry_run)
     else:result={'status':'exported','rows':{name:len(rows)-1 for name,rows in source['tabs'].items()}}
     print(json.dumps(result,ensure_ascii=False))
 

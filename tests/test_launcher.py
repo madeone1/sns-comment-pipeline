@@ -24,7 +24,7 @@ class LauncherTests(unittest.TestCase):
                 'print -r -- "$PWD" > "$SNS_TEST_CWD"\n'
                 'print -rl -- "$@" > "$SNS_TEST_ARGS"\n'
                 ': > "$SNS_TEST_READY"\n'
-                'while [[ ! -e "$SNS_TEST_RELEASE" ]]; do /bin/sleep 0.02; done\n')
+                'while [[ ! -e "$SNS_TEST_RELEASE" ]]; do /bin/sleep 0.02; done\n', encoding="utf-8")
             executable.chmod(0o700)
             env = {**os.environ, "PATH": str(root) + ":" + os.environ.get("PATH", ""),
                    "SNS_TEST_CWD": str(root / "cwd"), "SNS_TEST_ARGS": str(root / "args"),
@@ -38,13 +38,13 @@ class LauncherTests(unittest.TestCase):
                 self.assertTrue(ready.exists())
                 # The old launcher resumed reading a shifted file offset and
                 # raised the exact unmatched-quote error seen in Terminal.
-                entry.write_text('#!/bin/zsh\nread "unfinished\n')
+                entry.write_text('#!/bin/zsh\nread "unfinished\n', encoding="utf-8")
                 release.touch()
                 stdout, stderr = child.communicate(timeout=5)
                 self.assertEqual(child.returncode, 0, stderr)
                 self.assertNotIn("unmatched", stderr)
-                self.assertEqual((root / "cwd").read_text().strip(), str(root))
-                self.assertEqual((root / "args").read_text().splitlines(),
+                self.assertEqual((root / "cwd").read_text(encoding="utf-8").strip(), str(root))
+                self.assertEqual((root / "args").read_text(encoding="utf-8").splitlines(),
                     ["-m", "sns_comment.launcher", "--max-total-requests", "40"])
             finally:
                 if child.poll() is None:
@@ -61,12 +61,12 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(launcher.main([]), 1)
             collect.assert_called_once_with(["run", "--until-complete"])
             path = Path(folder) / ".local" / "last-launch.json"
-            record = json.loads(path.read_text())
+            record = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(record["status"], "incomplete")
             self.assertEqual(record["exit_code"], 1)
             self.assertTrue(record["ended_at"])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            self.assertNotIn("synthetic-secret", path.read_text() + output.getvalue())
+            self.assertNotIn("synthetic-secret", path.read_text(encoding="utf-8") + output.getvalue())
             self.assertIn("수집 미완료", output.getvalue())
 
     def test_launch_records_early_failure_before_a_collection_run_exists(self):
@@ -76,7 +76,7 @@ class LauncherTests(unittest.TestCase):
                 mock.patch("sys.stdin.isatty", return_value=False), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(launcher.main([]), 2)
-            record = json.loads((Path(folder) / ".local" / "last-launch.json").read_text())
+            record = json.loads((Path(folder) / ".local" / "last-launch.json").read_text(encoding="utf-8"))
             self.assertEqual(record["exit_code"], 2)
             self.assertEqual(record["status"], "incomplete")
 

@@ -15,7 +15,8 @@ SECRET_VERSION = re.compile(r'projects/[a-z0-9-]+/secrets/(?:sns-meta-token|sns-
 def initial_registry(settings):
     result = {'schema': 1, 'groups': {}, 'accounts': {}, 'audit': []}
     primary = settings['expected_username'].lstrip('@')
-    labels = {'waterbomb_official': '대표(공식)', 'waterbomb_busan_official': '부산', 'waterbomb_sokcho_official': '속초'}
+    labels = {'waterbomb_official': '대표(공식)', 'waterbomb_busan_official': '부산',
+              'waterbomb_sokcho_official': '속초', 'waterbomb_toronto_official': '토론토'}
     scheduled = settings.get('cloud', {}).get('scheduled_accounts', [primary])
     for name in [primary, *settings.get('accounts', {})]:
         config = select(settings, name)

@@ -187,7 +187,7 @@ def save_result(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".notion-token-test-", dir=path.parent)
     try:
-        with os.fdopen(descriptor, "w") as output:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(value, output, ensure_ascii=False, indent=2)
             output.write("\n")
         os.replace(temporary, path)
@@ -206,7 +206,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     token = None
     try:
-        config = json.loads(args.config.read_text())
+        config = json.loads(args.config.read_text(encoding="utf-8"))
         print("Notion MCP 토큰 연결과 보고 대상 조회를 검사합니다. 문서를 수정하지 않습니다.", flush=True)
         token = input_token()
         result = probe(token, config, args.day, diagnose=args.diagnose)
