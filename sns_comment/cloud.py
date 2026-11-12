@@ -445,8 +445,17 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                     moderator = VertexModerator(state.transport, project, config.get("cloud", {}).get("ai_model", "gemini-3.8-flash"))
                     # Decisions live at the bucket root so the 10-minute sweep and the morning job share them.
                     shared_state = state if not state.prefix else CloudState(state.bucket, state.transport)
+                    sheet_client = None
+                    try:
+                        target = (config.get("workflow") or {}).get("google_sheets") or {}
+                        if target.get("enabled") and target.get("spreadsheet_id"):
+                            from .sheets import SheetsClient
+                            sheet_client = SheetsClient(google_access_token(target, state.transport), target["spreadsheet_id"])
+                    except PilotError as error:
+                        log("moderation_sheet_unavailable", account=config["expected_username"], error=str(error))
                     note = moderate(rows, shared_state, config, moderator, client=client,
-                        account_username=config["expected_username"], region=config.get("region_label"))
+                        account_username=config["expected_username"], region=config.get("region_label"),
+                        sheet_client=sheet_client)
                     log("moderation_daily_recorded", account=config["expected_username"], classified=note["classified"],
                         would_hide=note["would_hide"], human_review=note["human_review"], kept=note["kept"])
                 except (PilotError, OSError, ValueError, KeyError, TypeError) as error:

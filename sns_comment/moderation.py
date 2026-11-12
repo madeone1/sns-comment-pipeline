@@ -14,6 +14,7 @@ import unicodedata
 
 from .api import GraphError, PilotError
 from .cloud_state import CloudError
+from .moderation_sheet import display_status, needs_sheet, sync_sheet
 from .screening import classify as screen_comment
 from .storage import timestamp
 
@@ -212,15 +213,24 @@ def _status_for(choice):
     return "kept"
 
 
-def _record(comment, choice, account_username, region, book, sha, status, attempts, human=None, extra=None):
+def _record(comment, choice, account_username, region, book, sha, status, attempts, human=None, extra=None, existing=None):
     now = dt.datetime.now(dt.timezone.utc).isoformat()
+    author = comment.get("username") if isinstance(comment.get("username"), str) else ""
+    permalink = comment.get("permalink") if isinstance(comment.get("permalink"), str) else ""
+    if isinstance(existing, dict):
+        if not author and isinstance(existing.get("author_username"), str):
+            author = existing["author_username"]
+        if not permalink and isinstance(existing.get("permalink"), str):
+            permalink = existing["permalink"]
     record = {
         "version": 1,
         "account_id": comment["account_id"],
         "account_username": account_username,
-        "region": region,
+        "region": region or (existing or {}).get("region") if isinstance(existing, dict) else region,
         "comment_id": comment["id"],
         "media_id": comment.get("media_id"),
+        "author_username": author,
+        "permalink": permalink,
         "text": comment.get("text") if isinstance(comment.get("text"), str) else "",
         "text_hash": text_hash(comment.get("text")),
         "label": choice["label"],
@@ -237,6 +247,8 @@ def _record(comment, choice, account_username, region, book, sha, status, attemp
         "classified_at": now,
         "updated_at": now,
     }
+    if isinstance(existing, dict) and existing.get("sheet_synced_status"):
+        record["sheet_synced_status"] = existing["sheet_synced_status"]
     if extra:
         record.update(extra)
     return record
@@ -253,6 +265,63 @@ def _log_would_hide(record):
 
 def decision_name(account_id, comment_id):
     return f"moderation/decisions/{account_id}/{comment_id}.json"
+
+
+SHEET_PENDING = "moderation/sheet-pending.json"
+
+
+def _sheet_snapshot(record):
+    keys = ("account_id", "comment_id", "region", "account_username", "author_username", "permalink",
+            "text", "rule_id", "reason", "confidence", "status", "error", "updated_at", "classified_at",
+            "sheet_synced_status")
+    snap = {key: record.get(key) for key in keys}
+    snap["decision"] = decision_name(record["account_id"], record["comment_id"])
+    return snap
+
+
+def _queue_sheet(state, records):
+    wanted = [record for record in records if needs_sheet(record)]
+    if not wanted:
+        return
+    current, generation = state.json_get(SHEET_PENDING, {"items": {}})
+    if not isinstance(current, dict):
+        current = {"items": {}}
+    items = current.setdefault("items", {})
+    for record in wanted:
+        items[record["account_id"] + ":" + record["comment_id"]] = _sheet_snapshot(record)
+    _put(state, SHEET_PENDING, current, generation)
+
+
+def flush_sheet_log(state, client):
+    """Write queued rows. Raises PilotError when the sheet is unavailable."""
+    current, generation = state.json_get(SHEET_PENDING, {"items": {}})
+    if not isinstance(current, dict):
+        current = {"items": {}}
+    items = dict(current.get("items") or {})
+    if not items:
+        return []
+    records, located = [], []
+    for key, snap in items.items():
+        name = snap.get("decision") if isinstance(snap, dict) else None
+        stored, gen = state.json_get(name) if isinstance(name, str) else (None, 0)
+        record = stored if isinstance(stored, dict) and stored.get("comment_id") else snap
+        if not isinstance(record, dict) or not needs_sheet(record):
+            items.pop(key, None)
+            continue
+        records.append(record)
+        located.append((key, name, gen, record))
+    reflected = sync_sheet(client, records) if records else []
+    done = {(item.get("account_id"), item.get("comment_id")) for item in reflected}
+    for key, name, gen, record in located:
+        if (record.get("account_id"), record.get("comment_id")) not in done:
+            continue
+        record["sheet_synced_status"] = display_status(record)
+        if isinstance(name, str):
+            _put(state, name, record, gen)
+        items.pop(key, None)
+    current["items"] = items
+    _put(state, SHEET_PENDING, current, generation)
+    return reflected
 
 
 def _put(state, name, value, generation):
@@ -335,7 +404,7 @@ def _apply_hide(client, comment_id):
     return client.hide_comment(comment_id)
 
 
-def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None):
+def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None):
     """Record every decision. POST hide=true only for a high-confidence 숨김 when hiding is enabled."""
     mod = settings.get("moderation") or {}
     if mod.get("mode", "dry_run") == "off":
@@ -344,7 +413,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
     book = load_rulebook(mod.get("policy_version"))
     sha = policy_sha(book)
     size = batch_size or int(mod.get("batch_size") or 20)
-    classify, promote, skipped, preexisting = [], [], [], {}
+    classify, promote, skipped, preexisting, sheet_records = [], [], [], {}, []
     for comment in comments:
         if not isinstance(comment, dict) or not isinstance(comment.get("id"), str) or not COMMENT_ID.fullmatch(comment["id"]):
             continue
@@ -355,6 +424,8 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         preexisting[comment["id"]] = (existing, generation, name)
         if _human_kept(existing) or (isinstance(existing, dict) and existing.get("status") == "hidden"):
             skipped.append(existing)
+            if isinstance(existing, dict):
+                sheet_records.append(existing)
             continue
         action = _pending_hide(existing, comment, sha, settings)
         if action:
@@ -362,6 +433,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
             continue
         if _same(existing, comment, sha):
             skipped.append(existing)
+            sheet_records.append(existing)
             continue
         classify.append(comment)
     summary = {"status": "complete", "classified": 0, "skipped": len(skipped), "would_hide": 0, "hidden": 0,
@@ -397,7 +469,8 @@ def moderate(comments, state, settings, model, client=None, account_username="",
                     status = "hide_failed"
                     extra["error"] = str(error)
             record = _record(comment, choice, account_username, region, book, sha, status, attempts,
-                             human=(existing or {}).get("human_decision") if isinstance(existing, dict) else None, extra=extra)
+                             human=(existing or {}).get("human_decision") if isinstance(existing, dict) else None,
+                             extra=extra, existing=existing if isinstance(existing, dict) else None)
             if isinstance(existing, dict) and existing.get("classified_at"):
                 record["classified_at"] = existing["classified_at"]
             _put(state, name, record, generation)
@@ -430,13 +503,25 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         else:
             extra["hidden_by"] = "already"
         record = _record(comment, choice, account_username, region, book, sha, status, attempts,
-                         human=existing.get("human_decision"), extra=extra)
+                         human=existing.get("human_decision"), extra=extra, existing=existing)
         record["classified_at"] = existing.get("classified_at") or record["classified_at"]
         _put(state, name, record, generation)
         summary[status] += 1
         written.append(record)
     if written or summary["usage"]["calls"]:
         _store_daily(state, written, summary["usage"])
+    sheet_records.extend(written)
+    _queue_sheet(state, sheet_records)
+    if sheet_client is not None:
+        pending, _ = state.json_get(SHEET_PENDING, {"items": {}})
+        if isinstance(pending, dict) and pending.get("items"):
+            try:
+                flush_sheet_log(state, sheet_client)
+                summary["sheet"] = "synced"
+            except (PilotError, OSError, ValueError, KeyError, TypeError) as error:
+                summary["sheet"] = "failed"
+                message = str(error) if isinstance(error, PilotError) else "시트 기록을 남기지 못했습니다."
+                _log("moderation_sheet_failed", error=message)
     return summary
 
 
