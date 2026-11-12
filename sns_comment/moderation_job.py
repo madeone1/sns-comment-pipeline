@@ -32,6 +32,7 @@ def log(event, **values):
 def comment_from_payload(item, account_id, owner, media_id, parent_id=None, permalink=None):
     author = item.get("from") if isinstance(item.get("from"), dict) else {}
     username = item.get("username") if isinstance(item.get("username"), str) else author.get("username")
+    author_id = author.get("id") if isinstance(author.get("id"), str) and author.get("id").strip() else None
     if isinstance(username, str) and username.casefold() == owner.casefold():
         is_owner = 1
     elif isinstance(username, str):
@@ -46,7 +47,7 @@ def comment_from_payload(item, account_id, owner, media_id, parent_id=None, perm
             written = None
     link = permalink if isinstance(permalink, str) else None
     return {"id": item.get("id"), "account_id": account_id, "media_id": media_id, "parent_id": parent_id,
-            "username": username if isinstance(username, str) else None, "is_owner": is_owner,
+            "username": username if isinstance(username, str) else None, "author_id": author_id, "is_owner": is_owner,
             "text": item.get("text") if isinstance(item.get("text"), str) else None, "written_at": written,
             "permalink": link, "already_hidden": item.get("hidden") is True}
 
