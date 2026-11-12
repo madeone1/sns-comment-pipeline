@@ -232,6 +232,12 @@ def run(settings, state, project, now=None):
                 flush_sheet_log(state, sheet)
             except PilotError as error:
                 log("moderation_sheet_failed", error=str(error))
+            try:
+                from .human_decision import apply_human_decisions
+                decisions = apply_human_decisions(sheet, client)
+                log("human_decision_scan", updates=decisions["updates"], planned=len(decisions["plans"]))
+            except PilotError as error:
+                log("human_decision_failed", error=str(error))
         return result
     finally:
         del token

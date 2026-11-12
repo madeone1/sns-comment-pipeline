@@ -14,6 +14,7 @@ import urllib.parse
 from sns_comment.api import GraphClient, GraphError, PilotError
 from sns_comment.moderation import (decision_name, finalize, guard, hannam_slur, hiding_enabled,
                                     load_rulebook, moderate, prompt_for, recent_rows)
+from sns_comment.human_decision import apply_human_decisions
 from sns_comment.moderation import backfill_sheet
 from sns_comment.moderation_sheet import HIDE_COLUMNS, HIDE_SHEET_ID, HIDE_TAB, REVIEW_COLUMNS, REVIEW_SHEET_ID, REVIEW_TAB
 from sns_comment.moderation_job import sweep_account
@@ -379,7 +380,7 @@ class FakeSheets:
             REVIEW_TAB: {"id": REVIEW_SHEET_ID, "rows": [list(note), list(REVIEW_COLUMNS)]},
         }
         self.original = {title: [list(row) for row in tab["rows"]] for title, tab in self.tabs.items()}
-        self.updates, self.fail = [], False
+        self.updates, self.validations, self.fail = [], [], False
 
     def request(self, suffix="", query=None, body=None):
         if self.fail:
@@ -387,16 +388,26 @@ class FakeSheets:
         if isinstance(body, dict) and body.get("requests"):
             self.updates.append(body)
             for request in body["requests"]:
+                if "setDataValidation" in request:
+                    self.validations.append(request["setDataValidation"])
+                    continue
                 self.assert_no_structural_edit(request)
                 update = request["updateCells"]
                 title = next(name for name, tab in self.tabs.items() if tab["id"] == update["range"]["sheetId"])
                 start = update["range"]["startRowIndex"]
+                start_col = update["range"].get("startColumnIndex", 0)
                 written = [[item.get("userEnteredValue", {}).get("stringValue", "") for item in row["values"]]
                            for row in update["rows"]]
                 tab = self.tabs[title]
-                while len(tab["rows"]) < start:
+                while len(tab["rows"]) < start + len(written):
                     tab["rows"].append([])
-                tab["rows"][start:start + len(written)] = written
+                for offset, values in enumerate(written):
+                    row = tab["rows"][start + offset]
+                    needed = start_col + len(values)
+                    if len(row) < needed:
+                        row.extend([""] * (needed - len(row)))
+                    for column, value in enumerate(values):
+                        row[start_col + column] = value
             return {"replies": []}
         if suffix.startswith("/values/"):
             title = urllib.parse.unquote(suffix.split("/values/", 1)[1]).split("!", 1)[0].strip("'")
@@ -547,6 +558,94 @@ class SheetLogTests(unittest.TestCase):
         backfill_sheet(state, sheet)
         old = [row for row in sheet.data(HIDE_TAB) if len(row) > 6 and row[6] == "17936497245410609"]
         self.assertEqual(old[0][2], "")
+
+
+def review_row(number, comment_id, decision, memo):
+    return [str(number), "서울 댓글", "2026-07-05 12:23", "fan", "본문", "https://www.instagram.com/p/x/",
+            comment_id, "", "H1", "애매", "보통", decision, memo]
+
+
+class HumanGraph:
+    def __init__(self, error=None, hidden=True):
+        self.calls, self.error, self.hidden = [], error, hidden
+
+    def hide_comment(self, comment_id):
+        self.calls.append(comment_id)
+        if self.error:
+            raise self.error
+        return {"success": True}
+
+    def get(self, path, **params):
+        if params.get("fields") != "hidden":
+            raise AssertionError("only a hidden check is allowed")
+        return {"id": path, "hidden": self.hidden}
+
+
+class HumanDecisionTests(unittest.TestCase):
+    def sheet(self, rows):
+        sheet = FakeSheets()
+        sheet.tabs[REVIEW_TAB]["rows"].extend(rows)
+        return sheet
+
+    def test_dropdown_is_added_without_changing_existing_cells(self):
+        sheet = self.sheet([
+            review_row(1, "18087079217429612", "숨김", "2026-11-11 15:48 KST 숨김 완료"),
+            review_row(30, "18000000000000030", "숨김", ""),
+        ])
+        before = [list(row) for row in sheet.tabs[REVIEW_TAB]["rows"]]
+        apply_human_decisions(sheet, HumanGraph(), hide_enabled=True)
+        self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"], before)
+        rule = sheet.validations[0]["rule"]["condition"]
+        self.assertEqual([item["userEnteredValue"] for item in rule["values"]], ["숨김", "유지"])
+        area = sheet.validations[0]["range"]
+        self.assertEqual(area["startRowIndex"], 2)
+        self.assertEqual(area["startColumnIndex"], 11)
+        self.assertEqual(len(sheet.validations), 1)
+
+    def test_hide_runs_once_keep_does_not_call_the_api_and_manual_rows_stay(self):
+        moment = dt.datetime(2026, 11, 12, 8, 0, tzinfo=dt.timezone.utc)
+        sheet = self.sheet([
+            review_row(1, "18087079217429612", "숨김", "2026-11-11 15:48 KST 숨김 완료"),
+            review_row(2, "18077060762319401", "유지", ""),
+            review_row(30, "18000000000000030", "숨김", ""),
+            review_row(38, "18111760985229472", "숨김", "2026-11-12 17:05 KST 자동 감지"),
+            review_row(39, "17936497245410609", "유지", "2026-11-12 17:05 KST 자동 감지"),
+        ])
+        graph = HumanGraph()
+        apply_human_decisions(sheet, graph, now=moment, hide_enabled=True)
+        self.assertEqual(graph.calls, ["18111760985229472"])
+        rows = {row[6]: row for row in sheet.data(REVIEW_TAB)}
+        self.assertEqual(rows["18087079217429612"][12], "2026-11-11 15:48 KST 숨김 완료")
+        self.assertEqual(rows["18077060762319401"][12], "")
+        self.assertEqual(rows["18000000000000030"][12], "")
+        self.assertEqual(rows["18111760985229472"][11], "숨김")
+        self.assertIn("숨김 완료", rows["18111760985229472"][12])
+        self.assertIn("유지 확정", rows["17936497245410609"][12])
+        apply_human_decisions(sheet, graph, now=moment, hide_enabled=True)
+        self.assertEqual(graph.calls, ["18111760985229472"])
+
+    def test_flag_off_writes_a_trial_status_and_does_not_hide(self):
+        sheet = self.sheet([review_row(38, "18111760985229472", "숨김", "2026-11-12 17:05 KST 자동 감지")])
+        graph = HumanGraph()
+        with mock.patch.dict("os.environ", {"SNS_HUMAN_DECISION_HIDE": "", "SNS_MODERATION_HIDE": "1"}, clear=False):
+            apply_human_decisions(sheet, graph, now=dt.datetime(2026, 11, 12, 8, 0, tzinfo=dt.timezone.utc))
+        self.assertEqual(graph.calls, [])
+        self.assertIn("숨김 예정(시험)", sheet.data(REVIEW_TAB)[-1][12])
+
+    def test_deleted_comment_stops_and_a_temporary_error_retries_only_three_times(self):
+        moment = dt.datetime(2026, 11, 12, 8, 0, tzinfo=dt.timezone.utc)
+        sheet = self.sheet([review_row(38, "18111760985229472", "숨김", "2026-11-12 17:05 KST 자동 감지")])
+        gone = HumanGraph(error=GraphError(400, 100))
+        apply_human_decisions(sheet, gone, now=moment, hide_enabled=True)
+        self.assertIn("숨김 실패 (중단)", sheet.data(REVIEW_TAB)[-1][12])
+        apply_human_decisions(sheet, gone, now=moment, hide_enabled=True)
+        self.assertEqual(gone.calls, ["18111760985229472"])
+        sheet = self.sheet([review_row(38, "18111760985229472", "숨김", "2026-11-12 17:05 KST 사람 판단 대기")])
+        flaky = HumanGraph(error=GraphError(500, 1))
+        for _ in range(4):
+            apply_human_decisions(sheet, flaky, now=moment, hide_enabled=True)
+        self.assertEqual(len(flaky.calls), 3)
+        self.assertIn("숨김 실패 (3/3)", sheet.data(REVIEW_TAB)[-1][12])
 
 
 if __name__ == "__main__":
