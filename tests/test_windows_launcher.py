@@ -39,6 +39,8 @@ class WindowsLauncherFileTests(unittest.TestCase):
         self.assertTrue(self.ps1.startswith(b'\xef\xbb\xbf'))
         self.assertNotIn(b'\n', self.ps1.replace(b'\r\n', b''))
         self.assertIn('sns_comment.token_cli', self.script)
+        self.assertIn("('gcloud.cmd', 'gcloud')", self.script)
+        self.assertIn('*.ps1', self.script)
         self.assertIn('ValueFromRemainingArguments', self.script)
         self.assertIn('https://www.python.org/downloads/windows/', self.script)
         self.assertIn('https://cloud.google.com/sdk/docs/install', self.script)

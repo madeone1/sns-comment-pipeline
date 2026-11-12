@@ -16,6 +16,7 @@ from .api import PilotError
 
 
 ENV_ACCOUNT = 'SNS_GCLOUD_ACCOUNT'
+WINDOWS = os.name == 'nt'
 EMAIL = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 
 
@@ -49,10 +50,69 @@ def gcloud_argv(args, project=None, account=None):
     return command
 
 
+def gcloud_executable():
+    """Path used to launch gcloud.
+
+    On Windows, ``shutil.which('gcloud.cmd')`` selects the batch file.
+    PowerShell would otherwise prefer ``gcloud.ps1``, which execution
+    policy can block. POSIX keeps a normal ``gcloud`` lookup.
+    """
+    if WINDOWS:
+        found = shutil.which('gcloud.cmd') or shutil.which('gcloud')
+        if found and found.lower().endswith('.ps1'):
+            sibling = os.path.splitext(found)[0] + '.cmd'
+            if os.path.isfile(sibling):
+                return sibling
+        return found
+    return shutil.which('gcloud')
+
+
+def quote_windows_arg(value):
+    """Quote one argument for cmd.exe. Percent signs are not expanded."""
+    escaped = value.replace('%', '%%').replace('"', '""')
+    if value == '' or any(char in value for char in ' \t"&<>()@^|%'):
+        return '"' + escaped + '"'
+    return escaped
+
+
+def windows_batch_command(argv):
+    """Run a ``.cmd`` through ``cmd.exe`` without ``shell=True``.
+
+    CreateProcess cannot execute a batch file directly. ``/d`` skips
+    AutoRun, ``/v:off`` disables delayed expansion, and ``/s`` strips one
+    pair of quotes around the command.
+    """
+    comspec = os.environ.get('ComSpec') or os.environ.get('COMSPEC')
+    if not comspec:
+        comspec = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'cmd.exe')
+    inner = ' '.join(quote_windows_arg(part) for part in argv)
+    return quote_windows_arg(comspec) + ' /d /v:off /s /c "' + inner + '"'
+
+
+def gcloud_command(args, project=None, account=None):
+    """argv list on POSIX; a cmd.exe command line when the program is a batch file."""
+    argv = gcloud_argv(args, project=project, account=account)
+    if not WINDOWS:
+        return argv
+    program = gcloud_executable()
+    if not program:
+        return argv
+    argv = [program, *argv[1:]]
+    if program.lower().endswith(('.cmd', '.bat')):
+        return windows_batch_command(argv)
+    return argv
+
+
 def run_gcloud(args, project=None, account=None, **kwargs):
-    if shutil.which('gcloud') is None:
+    if gcloud_executable() is None:
         raise PilotError('Google Cloud CLI가 필요합니다. 설치 후 이 파일을 다시 실행해주세요. https://cloud.google.com/sdk/docs/install')
-    return subprocess.run(gcloud_argv(args, project=project, account=account), capture_output=True, text=True, **kwargs)
+    command = gcloud_command(args, project=project, account=account)
+    options = {'capture_output': True, 'text': True}
+    if WINDOWS:
+        options['encoding'] = 'utf-8'
+        options['errors'] = 'replace'
+    options.update(kwargs)
+    return subprocess.run(command, **options)
 
 
 def _accounts_from(stdout):

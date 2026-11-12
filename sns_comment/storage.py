@@ -2,7 +2,7 @@
 
 import contextlib
 import datetime as dt
-import fcntl
+import errno
 import hashlib
 import json
 import os
@@ -11,6 +11,9 @@ import sqlite3
 import uuid
 
 from .api import PilotError
+
+
+WINDOWS = os.name == "nt"
 
 
 def now():
@@ -29,6 +32,42 @@ def timestamp(value):
         raise PilotError("시간대가 있는 댓글 작성 시각을 확인해야 합니다.") from None
 
 
+def _lock_held(error):
+    """Windows byte-range locks report a busy file as an access or deadlock error."""
+    if getattr(error, "winerror", None) in (33, 36):
+        return True
+    return error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK)
+
+
+def _lock_exclusive(lock):
+    """Exclusive non-blocking lock. POSIX keeps flock; Windows uses msvcrt."""
+    if WINDOWS:
+        import msvcrt
+        os.lseek(lock.fileno(), 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            if _lock_held(error):
+                raise BlockingIOError(error.errno or 0, "lock held") from None
+            raise
+        return
+    import fcntl
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(lock):
+    if WINDOWS:
+        import msvcrt
+        os.lseek(lock.fileno(), 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+    import fcntl
+    fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
 def run_lock(db_path):
     path = Path(str(db_path) + ".lock")
@@ -36,13 +75,13 @@ def run_lock(db_path):
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "a") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_exclusive(lock)
         except BlockingIOError:
             raise PilotError("같은 DB의 수집 작업이 이미 실행 중입니다.") from None
         try:
             yield
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            _unlock(lock)
 
 
 class Store:
