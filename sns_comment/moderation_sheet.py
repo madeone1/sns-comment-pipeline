@@ -1,8 +1,7 @@
-"""Append moderation decisions to the existing operations spreadsheet.
+"""Append moderation rows to the rulebook spreadsheet. Never edit existing rows.
 
-The daily job already owns that file. This writer only adds two tabs and never
-touches region tabs. A sheet error is the caller's to catch; it must not stop
-classification. Rows are keyed by comment ID.
+Row 1 is a note, row 2 is the header, and data starts on row 3. Comment IDs
+already in column G are left untouched. A sheet error must not stop classification.
 """
 
 import datetime as dt
@@ -13,11 +12,29 @@ from .sheets import cell
 
 
 KST = dt.timezone(dt.timedelta(hours=9))
-HIDE_TAB = "숨김 기록"
-REVIEW_TAB = "사람 판단 대기"
-COLUMNS = ["처리 시각(KST)", "계정", "게시물 링크", "댓글 ID", "작성자", "댓글 원문", "규칙 ID", "판정 이유", "신뢰도", "상태"]
-COMMENT_COLUMN = 3
-STATUS_COLUMN = 9
+HIDE_TAB = "숨김 대상"
+REVIEW_TAB = "사람 판단"
+HIDE_SHEET_ID = 123926565
+REVIEW_SHEET_ID = 715862237
+HIDE_COLUMNS = ["번호", "계정/탭", "댓글 작성일(KST)", "작성자", "댓글 원문", "게시물 URL", "댓글 ID",
+                "원댓글 ID", "규칙 ID", "판정 이유", "확신도", "처리상태", "비고"]
+REVIEW_COLUMNS = ["번호", "계정/탭", "댓글 작성일(KST)", "작성자", "댓글 원문", "게시물 URL", "댓글 ID",
+                  "원댓글 ID", "규칙 ID", "판정 이유", "확신도", "담당자 결정", "메모"]
+COMMENT_COLUMN = 6
+HEADER_ROW = 1
+FIRST_DATA_ROW = 2
+ACCOUNT_TABS = {
+    "서울": "서울 댓글",
+    "대표(공식)": "서울 댓글",
+    "대표": "서울 댓글",
+    "부산": "부산 댓글",
+    "속초": "속초 댓글",
+    "토론토": "토론토 댓글",
+    "waterbomb_official": "서울 댓글",
+    "waterbomb_busan_official": "부산 댓글",
+    "waterbomb_sokcho_official": "속초 댓글",
+    "waterbomb_toronto_official": "토론토 댓글",
+}
 
 
 def display_status(record):
@@ -27,9 +44,6 @@ def display_status(record):
     if status == "hidden":
         return "숨김 완료"
     if status == "hide_failed":
-        error = record.get("error")
-        if isinstance(error, str) and error.strip():
-            return "숨김 실패 (" + " ".join(error.split())[:80] + ")"
         return "숨김 실패"
     if status == "human_review":
         return "사람판단"
@@ -49,33 +63,97 @@ def needs_sheet(record):
     return bool(tab_for(record)) and shown is not None and record.get("sheet_synced_status") != shown
 
 
-def _when(record):
-    raw = record.get("updated_at") or record.get("classified_at")
-    if not isinstance(raw, str) or not raw:
-        return ""
+def _columns(title):
+    if title == HIDE_TAB:
+        return HIDE_COLUMNS
+    if title == REVIEW_TAB:
+        return REVIEW_COLUMNS
+    raise PilotError("알 수 없는 기준표 탭입니다.")
+
+
+def _sheet_id(title):
+    return HIDE_SHEET_ID if title == HIDE_TAB else REVIEW_SHEET_ID
+
+
+def _parsed(value):
+    if not isinstance(value, str) or not value:
+        return None
     try:
-        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(KST)
     except ValueError:
+        return None
+
+
+def _clock(value):
+    parsed = _parsed(value)
+    return parsed.strftime("%Y-%m-%d %H:%M") if parsed else ""
+
+
+def account_tab(record):
+    region = record.get("region") if isinstance(record.get("region"), str) else ""
+    username = record.get("account_username") if isinstance(record.get("account_username"), str) else ""
+    if region in ACCOUNT_TABS:
+        return ACCOUNT_TABS[region]
+    if username in ACCOUNT_TABS:
+        return ACCOUNT_TABS[username]
+    if region.endswith(" 댓글") or region.endswith("댓글"):
+        return region
+    if region:
+        return region + " 댓글"
+    return username
+
+
+def _confidence(record):
+    value = record.get("confidence")
+    return {"high": "높음", "medium": "보통", "low": "낮음", "높음": "높음", "보통": "보통", "낮음": "낮음"}.get(value, "보통" if value else "")
+
+
+def _note(record, hide_tab):
+    when = _clock(record.get("updated_at") or record.get("classified_at"))
+    if hide_tab:
+        text = (when + " KST 자동 감지(10분 작업)").strip()
+        if record.get("status") == "hidden" and record.get("hidden_check"):
+            text += " " + str(record["hidden_check"])
+        if record.get("status") == "hide_failed" and record.get("error"):
+            text += " " + " ".join(str(record["error"]).split())[:80]
+        return text
+    return (when + " KST 자동 감지").strip()
+
+
+def row_values(record, number):
+    hide_tab = tab_for(record) == HIDE_TAB
+    values = [str(number), account_tab(record), _clock(record.get("written_at")), record.get("author_username") or "",
+              record.get("text") or "", record.get("permalink") or "", str(record.get("comment_id") or ""),
+              record.get("parent_id") or "", record.get("rule_id") or "", record.get("reason") or "",
+              _confidence(record)]
+    if hide_tab:
+        values.extend([display_status(record) or "", _note(record, True)])
+    else:
+        values.extend(["", _note(record, False)])
+    return values
+
+
+def _text(value):
+    if value is None or value == "":
         return ""
-    return parsed.astimezone(KST).strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return str(value)
 
 
-def row_values(record):
-    confidence = {"high": "높음", "low": "낮음"}.get(record.get("confidence"), record.get("confidence") or "")
-    account = record.get("region") or record.get("account_username") or ""
-    author = record.get("author_username") or ""
-    return [_when(record), account, record.get("permalink") or "", str(record.get("comment_id") or ""),
-            author, record.get("text") or "", record.get("rule_id") or "", record.get("reason") or "",
-            confidence, display_status(record) or ""]
-
-
-def _ids(metadata):
-    found = {}
-    for sheet in metadata.get("sheets") or []:
-        prop = sheet.get("properties") if isinstance(sheet, dict) else None
-        if isinstance(prop, dict) and isinstance(prop.get("title"), str) and isinstance(prop.get("sheetId"), int):
-            found[prop["title"]] = prop["sheetId"]
-    return found
+def _number(value):
+    text = _text(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if number < 0 or not number.is_integer():
+        return None
+    return int(number)
 
 
 def _metadata(client):
@@ -85,20 +163,25 @@ def _metadata(client):
     return value
 
 
-def _header_request(sheet_id):
-    return {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1,
-            "startColumnIndex": 0, "endColumnIndex": len(COLUMNS)},
-            "rows": [{"values": [cell(name) for name in COLUMNS]}], "fields": "userEnteredValue"}}
-
-
-def _row_request(sheet_id, row_index, values):
-    return {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": row_index, "endRowIndex": row_index + 1,
-            "startColumnIndex": 0, "endColumnIndex": len(COLUMNS)},
-            "rows": [{"values": [cell(value) for value in values]}], "fields": "userEnteredValue"}}
+def _resolve(metadata, title):
+    expected = _sheet_id(title)
+    found = None
+    for sheet in metadata.get("sheets") or []:
+        prop = sheet.get("properties") if isinstance(sheet, dict) else None
+        if not isinstance(prop, dict):
+            continue
+        if prop.get("title") == title and isinstance(prop.get("sheetId"), int):
+            found = prop["sheetId"]
+            break
+    if found is None:
+        raise PilotError("'" + title + "' 탭이 기준표 시트에 없습니다.")
+    if found != expected:
+        raise PilotError("'" + title + "' 탭의 시트 ID가 기준표와 다릅니다.")
+    return found
 
 
 def _range(title):
-    a1 = "'" + title.replace("'", "''") + "'!A:J"
+    a1 = "'" + title.replace("'", "''") + "'!A:M"
     return "/values/" + urllib.parse.quote(a1, safe="")
 
 
@@ -112,77 +195,51 @@ def _read_rows(client, title):
     return values
 
 
-def _text(value):
-    if value is None:
-        return ""
-    return str(value)
-
-
-def ensure_tabs(client, titles):
-    """Create a missing tab and its header. An existing header is left as-is."""
-    existing = _ids(_metadata(client))
-    requests, made = [], []
-    for offset, title in enumerate(titles):
-        if title in existing:
-            continue
-        sheet_id = 880000 + offset
-        while sheet_id in existing.values() or sheet_id in made:
-            sheet_id += 1
-        made.append(sheet_id)
-        requests.append({"addSheet": {"properties": {"sheetId": sheet_id, "title": title,
-            "gridProperties": {"rowCount": 5000, "columnCount": len(COLUMNS), "frozenRowCount": 1}}}})
-        requests.append(_header_request(sheet_id))
-        existing[title] = sheet_id
-    if requests:
-        client.request(":batchUpdate", body={"requests": requests})
-    return existing
+def _row_request(sheet_id, row_index, values):
+    if row_index < FIRST_DATA_ROW:
+        raise PilotError("기준표의 안내·머리글 행은 바꾸지 않습니다.")
+    return {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": row_index, "endRowIndex": row_index + 1,
+            "startColumnIndex": 0, "endColumnIndex": len(values)},
+            "rows": [{"values": [cell(value) for value in values]}], "fields": "userEnteredValue"}}
 
 
 def sync_sheet(client, records):
-    """Insert one row per new comment ID, or update the status cell's row when it changed.
-
-    Returns the records now reflected on the sheet. Raises PilotError on failure.
-    """
+    """Append rows whose comment ID is not already in column G. Existing rows stay as they are."""
     grouped = {}
     for record in records:
         title = tab_for(record)
-        if title and needs_sheet(record):
+        if title and display_status(record):
             grouped.setdefault(title, []).append(record)
     if not grouped:
-        return [record for record in records if not needs_sheet(record)]
-    ids = ensure_tabs(client, list(grouped))
+        return []
+    metadata = _metadata(client)
     reflected, requests = [], []
     for title, group in grouped.items():
-        sheet_id = ids.get(title)
-        if not isinstance(sheet_id, int):
-            ids = _ids(_metadata(client))
-            sheet_id = ids.get(title)
-        if not isinstance(sheet_id, int):
-            raise PilotError("시트 탭을 만들지 못했습니다.")
+        sheet_id = _resolve(metadata, title)
+        columns = _columns(title)
         rows = _read_rows(client, title)
-        header = [_text(value) for value in rows[0]] if rows else []
-        if header != COLUMNS:
-            if rows and any(_text(value) for value in rows[0]):
-                raise PilotError("'" + title + "' 첫 행이 기대하는 머리글과 다릅니다.")
-            requests.append(_header_request(sheet_id))
-            rows = [list(COLUMNS)]
-        found = {}
-        for index, row in enumerate(rows[1:], start=1):
+        header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
+        if header[:len(columns)] != columns:
+            raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
+        present = set()
+        last_number = 0
+        for row in rows[FIRST_DATA_ROW:]:
             comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
-            if comment_id and comment_id not in found:
-                found[comment_id] = index
-        next_row = len(rows)
+            if comment_id:
+                present.add(comment_id)
+            number = _number(row[0] if row else "")
+            if number is not None:
+                last_number = number
+        next_row = max(len(rows), FIRST_DATA_ROW)
         for record in group:
             comment_id = str(record.get("comment_id") or "")
-            values = row_values(record)
-            current = found.get(comment_id)
-            if current is None:
-                requests.append(_row_request(sheet_id, next_row, values))
-                found[comment_id] = next_row
-                next_row += 1
-            elif len(rows[current]) <= STATUS_COLUMN or _text(rows[current][STATUS_COLUMN]) != values[STATUS_COLUMN]:
-                requests.append(_row_request(sheet_id, current, values))
-                rows[current] = values
+            if not comment_id or comment_id in present:
+                reflected.append(record)
+                continue
+            last_number += 1
+            requests.append(_row_request(sheet_id, next_row, row_values(record, last_number)))
+            present.add(comment_id)
+            next_row += 1
             reflected.append(record)
     if requests:
         client.request(":batchUpdate", body={"requests": requests})

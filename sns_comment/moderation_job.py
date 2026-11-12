@@ -15,7 +15,7 @@ import sys
 from .api import GraphClient, GraphError, PilotError, page_data
 from .cloud_state import CloudError, CloudState
 from .connection_registry import REGISTRY_OBJECT, initial_registry, runtime_configs
-from .moderation import VertexModerator, _rate_limited, flush_sheet_log, moderate
+from .moderation import VertexModerator, _rate_limited, backfill_sheet, flush_sheet_log, moderate
 from .profiles import read_settings
 from .storage import timestamp
 from .token_connections import read_token, source_secret
@@ -200,14 +200,15 @@ def _reference(settings, configs):
 
 
 def open_sheet(settings, state):
-    """Reuse the daily job's spreadsheet and service-account writer. Failure stays non-fatal."""
-    target = (settings.get("workflow") or {}).get("google_sheets") or {}
-    if target.get("enabled") is not True or not target.get("spreadsheet_id"):
+    """Sheets token is the pipeline service account. The file is moderation.sheet.spreadsheet_id."""
+    spreadsheet_id = ((settings.get("moderation") or {}).get("sheet") or {}).get("spreadsheet_id")
+    auth = (settings.get("workflow") or {}).get("google_sheets") or {}
+    if not isinstance(spreadsheet_id, str) or not spreadsheet_id or auth.get("enabled") is not True:
         return None
     try:
         from .google_access import access_token
         from .sheets import SheetsClient
-        return SheetsClient(access_token(target, state.transport), target["spreadsheet_id"])
+        return SheetsClient(access_token(auth, state.transport), spreadsheet_id)
     except PilotError as error:
         log("moderation_sheet_unavailable", error=str(error))
         return None
@@ -242,9 +243,29 @@ def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description="새 댓글을 기준표로 분류합니다. 숨김은 설정이 켜진 경우에만 합니다.")
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
+    parser.add_argument("--backfill-sheet", action="store_true", help="저장된 판단을 기준표 시트에 이어서 붙입니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if args.backfill_sheet:
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            sheet = open_sheet(settings, state)
+            if sheet is None:
+                log("moderation_sheet_unavailable", error="기준표 시트를 열 수 없습니다.")
+                return 1
+            try:
+                with state.lease(540, "state/moderation-lease.json"):
+                    result = backfill_sheet(state, sheet)
+                log("moderation_sheet_backfill", **result)
+                return 0
+            except CloudError as error:
+                if "진행 중" in str(error) or "잠금" in str(error):
+                    log("moderation_deferred", reason=str(error))
+                    return 0
+                raise
+            except PilotError as error:
+                log("moderation_sheet_failed", error=str(error))
+                return 1
         if (settings.get("moderation") or {}).get("mode", "dry_run") == "off":
             log("moderation_off")
             return 0

@@ -447,10 +447,8 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                     shared_state = state if not state.prefix else CloudState(state.bucket, state.transport)
                     sheet_client = None
                     try:
-                        target = (config.get("workflow") or {}).get("google_sheets") or {}
-                        if target.get("enabled") and target.get("spreadsheet_id"):
-                            from .sheets import SheetsClient
-                            sheet_client = SheetsClient(google_access_token(target, state.transport), target["spreadsheet_id"])
+                        from .moderation_job import open_sheet
+                        sheet_client = open_sheet(config, shared_state)
                     except PilotError as error:
                         log("moderation_sheet_unavailable", account=config["expected_username"], error=str(error))
                     note = moderate(rows, shared_state, config, moderator, client=client,

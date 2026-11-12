@@ -14,7 +14,8 @@ import urllib.parse
 from sns_comment.api import GraphClient, GraphError, PilotError
 from sns_comment.moderation import (decision_name, finalize, guard, hannam_slur, hiding_enabled,
                                     load_rulebook, moderate, prompt_for, recent_rows)
-from sns_comment.moderation_sheet import COLUMNS, HIDE_TAB, REVIEW_TAB
+from sns_comment.moderation import backfill_sheet
+from sns_comment.moderation_sheet import HIDE_COLUMNS, HIDE_SHEET_ID, HIDE_TAB, REVIEW_COLUMNS, REVIEW_SHEET_ID, REVIEW_TAB
 from sns_comment.moderation_job import sweep_account
 from sns_comment.profiles import read_settings
 from sns_comment.storage import Store
@@ -325,6 +326,8 @@ class SweepTests(unittest.TestCase):
         settings = read_settings()
         self.assertEqual(settings["moderation"]["mode"], "dry_run")
         self.assertIs(settings["moderation"]["hide_enabled"], False)
+        self.assertEqual(settings["moderation"]["sheet"]["spreadsheet_id"], "1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY")
+        self.assertNotEqual(settings["moderation"]["sheet"]["spreadsheet_id"], settings["workflow"]["google_sheets"]["spreadsheet_id"])
         source = (ROOT / "sns_comment" / "moderation_job.py").read_text(encoding="utf-8")
         self.assertNotIn("addVersion", source)
         self.assertNotIn("hide=false", source)
@@ -368,27 +371,32 @@ class SweepTests(unittest.TestCase):
 
 class FakeSheets:
     def __init__(self):
-        self.tabs, self.updates, self.fail = {}, [], False
+        note = ["기존 안내"] + [""] * 13 + ["결정 완료", "37 / 37"]
+        existing = ["12", "서울 댓글", "2026-11-01 09:00", "old", "기존 댓글", "https://www.instagram.com/p/old/",
+                    "99999", "", "K1", "기존", "높음", "숨김 완료", "사람이 적은 행"]
+        self.tabs = {
+            HIDE_TAB: {"id": HIDE_SHEET_ID, "rows": [list(note), list(HIDE_COLUMNS), list(existing)]},
+            REVIEW_TAB: {"id": REVIEW_SHEET_ID, "rows": [list(note), list(REVIEW_COLUMNS)]},
+        }
+        self.original = {title: [list(row) for row in tab["rows"]] for title, tab in self.tabs.items()}
+        self.updates, self.fail = [], False
 
     def request(self, suffix="", query=None, body=None):
         if self.fail:
-            raise PilotError("Google Sheets 요청 실패 (HTTP 503). 원본 DB는 유지됩니다.")
+            raise PilotError("Google Sheets 요청 실패 (HTTP 403). 원본 DB는 유지됩니다.")
         if isinstance(body, dict) and body.get("requests"):
             self.updates.append(body)
             for request in body["requests"]:
-                if "addSheet" in request:
-                    prop = request["addSheet"]["properties"]
-                    self.tabs[prop["title"]] = {"id": prop["sheetId"], "rows": []}
-                elif "updateCells" in request:
-                    update = request["updateCells"]
-                    title = next(name for name, tab in self.tabs.items() if tab["id"] == update["range"]["sheetId"])
-                    start = update["range"]["startRowIndex"]
-                    written = [[cell.get("userEnteredValue", {}).get("stringValue", "") for cell in row["values"]]
-                               for row in update["rows"]]
-                    tab = self.tabs[title]
-                    while len(tab["rows"]) < start:
-                        tab["rows"].append([])
-                    tab["rows"][start:start + len(written)] = written
+                self.assert_no_structural_edit(request)
+                update = request["updateCells"]
+                title = next(name for name, tab in self.tabs.items() if tab["id"] == update["range"]["sheetId"])
+                start = update["range"]["startRowIndex"]
+                written = [[item.get("userEnteredValue", {}).get("stringValue", "") for item in row["values"]]
+                           for row in update["rows"]]
+                tab = self.tabs[title]
+                while len(tab["rows"]) < start:
+                    tab["rows"].append([])
+                tab["rows"][start:start + len(written)] = written
             return {"replies": []}
         if suffix.startswith("/values/"):
             title = urllib.parse.unquote(suffix.split("/values/", 1)[1]).split("!", 1)[0].strip("'")
@@ -396,45 +404,59 @@ class FakeSheets:
         return {"sheets": [{"properties": {"sheetId": tab["id"], "title": name, "gridProperties": {"rowCount": 5000}}}
                            for name, tab in self.tabs.items()]}
 
+    def assert_no_structural_edit(self, request):
+        if "addSheet" in request or "deleteSheet" in request:
+            raise AssertionError("existing tabs must not be created or deleted")
+        start = request["updateCells"]["range"]["startRowIndex"]
+        if start < 2:
+            raise AssertionError("note and header rows must stay untouched")
+
     def data(self, title):
-        return self.tabs[title]["rows"][1:]
+        return self.tabs[title]["rows"][2:]
 
 
 class SheetLogTests(unittest.TestCase):
-    def test_hide_rows_are_appended_once_and_status_updates_in_place(self):
+    def test_hide_rows_append_after_the_existing_number_and_do_not_repeat(self):
         state, sheet = MemoryState(), FakeSheets()
         model = Model({"30001": {**answer("숨김", "D3", reason="대상 욕설"), "id": "30001"}})
         comment = audience("=심한 욕")
         comment["permalink"] = "https://www.instagram.com/p/abc/"
+        comment["parent_id"] = "30000"
         first = moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
                          region="토론토", sheet_client=sheet)
         self.assertEqual(first["sheet"], "synced")
-        self.assertEqual(first["would_hide"], 1)
-        self.assertEqual(len(sheet.data(HIDE_TAB)), 1)
-        row = sheet.data(HIDE_TAB)[0]
-        self.assertEqual(row[1], "토론토")
-        self.assertEqual(row[2], "https://www.instagram.com/p/abc/")
-        self.assertEqual(row[3], "30001")
-        self.assertEqual(row[4], "fan")
-        self.assertEqual(row[5], "=심한 욕")
-        self.assertEqual(row[6], "D3")
-        self.assertEqual(row[9], "숨겼을 것(시험)")
-        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], COLUMNS)
+        self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], sheet.original[HIDE_TAB][0])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][1], HIDE_COLUMNS)
+        self.assertEqual(sheet.data(HIDE_TAB)[0][6], "99999")
+        row = sheet.data(HIDE_TAB)[1]
+        self.assertEqual(row[0], "13")
+        self.assertEqual(row[1], "토론토 댓글")
+        self.assertEqual(row[2], "2026-11-12 15:10")
+        self.assertEqual(row[3], "fan")
+        self.assertEqual(row[4], "=심한 욕")
+        self.assertEqual(row[5], "https://www.instagram.com/p/abc/")
+        self.assertEqual(row[6], "30001")
+        self.assertEqual(row[7], "30000")
+        self.assertEqual(row[8], "D3")
+        self.assertEqual(row[10], "높음")
+        self.assertEqual(row[11], "숨겼을 것(시험)")
+        self.assertIn("KST 자동 감지(10분 작업)", row[12])
         updates = len(sheet.updates)
         again = moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
                          region="토론토", sheet_client=sheet)
         self.assertEqual(again["skipped"], 1)
         self.assertEqual(len(sheet.updates), updates)
-        self.assertEqual(len(sheet.data(HIDE_TAB)), 1)
+        self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
+        frozen = [list(item) for item in sheet.data(HIDE_TAB)]
         client = Hides()
         with mock.patch.dict("os.environ", {"SNS_MODERATION_HIDE": "1"}, clear=False):
             hidden = moderate([comment], state, AUTO, model, client=client, account_username="waterbomb_toronto_official",
                               region="토론토", sheet_client=sheet)
         self.assertEqual(hidden["hidden"], 1)
         self.assertEqual(client.hidden, ["30001"])
-        self.assertEqual(len(sheet.data(HIDE_TAB)), 1)
-        self.assertEqual(sheet.data(HIDE_TAB)[0][9], "숨김 완료")
-        self.assertEqual(sheet.data(HIDE_TAB)[0][3], "30001")
+        self.assertEqual(sheet.data(HIDE_TAB), frozen)
+        self.assertEqual(sheet.data(HIDE_TAB)[1][11], "숨겼을 것(시험)")
 
     def test_a_sheet_failure_does_not_block_moderation_and_retries_once(self):
         state, sheet = MemoryState(), FakeSheets()
@@ -446,24 +468,29 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(failed["would_hide"], 1)
         self.assertEqual(failed["sheet"], "failed")
         self.assertEqual(state.data[decision_name(ACCOUNT, "30001")]["status"], "would_hide")
-        self.assertNotIn(HIDE_TAB, sheet.tabs)
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"], sheet.original[HIDE_TAB])
         sheet.fail = False
         moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_busan_official",
                  region="부산", sheet_client=sheet)
-        self.assertEqual(len(sheet.data(HIDE_TAB)), 1)
-        self.assertEqual(sheet.data(HIDE_TAB)[0][9], "숨겼을 것(시험)")
+        self.assertEqual(sheet.data(HIDE_TAB)[-1][1], "부산 댓글")
+        self.assertEqual(sheet.data(HIDE_TAB)[-1][11], "숨겼을 것(시험)")
         moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_busan_official",
                  region="부산", sheet_client=sheet)
-        self.assertEqual(len(sheet.data(HIDE_TAB)), 1)
+        self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
 
-    def test_human_review_has_its_own_tab_and_hide_failure_keeps_the_error(self):
+    def test_human_review_leaves_the_decision_blank_and_hide_failure_stays_in_the_note(self):
         state, sheet = MemoryState(), FakeSheets()
         review = audience("애매합니다", "30008")
         review["is_owner"] = None
         moderate([review], state, DRY, Model({}), client=Hides(), account_username="waterbomb_sokcho_official",
                  region="속초", sheet_client=sheet)
-        self.assertEqual(sheet.data(REVIEW_TAB)[0][9], "사람판단")
-        self.assertNotIn(HIDE_TAB, sheet.tabs)
+        row = sheet.data(REVIEW_TAB)[0]
+        self.assertEqual(row[1], "속초 댓글")
+        self.assertEqual(row[11], "")
+        self.assertIn("KST 자동 감지", row[12])
+        self.assertNotIn("10분 작업", row[12])
+        self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][0], sheet.original[REVIEW_TAB][0])
+        self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][0][-2:], ["결정 완료", "37 / 37"])
         before = len(sheet.data(REVIEW_TAB))
         moderate([review], state, DRY, Model({}), client=Hides(), account_username="waterbomb_sokcho_official",
                  region="속초", sheet_client=sheet)
@@ -472,8 +499,30 @@ class SheetLogTests(unittest.TestCase):
         model = Model({"30001": {**answer("숨김", "D3"), "id": "30001"}})
         moderate([audience("욕")], state, AUTO_ON, model, client=Hides(GraphError(400, 100)),
                  account_username="waterbomb_official", region="대표(공식)", sheet_client=sheet)
-        self.assertTrue(sheet.data(HIDE_TAB)[0][9].startswith("숨김 실패"))
-        self.assertIn("숨김 요청 실패", sheet.data(HIDE_TAB)[0][9])
+        failed = sheet.data(HIDE_TAB)[-1]
+        self.assertEqual(failed[1], "서울 댓글")
+        self.assertEqual(failed[11], "숨김 실패")
+        self.assertIn("숨김 요청 실패", failed[12])
+
+    def test_backfill_appends_stored_decisions_once(self):
+        state, sheet = MemoryState(), FakeSheets()
+        state.json_put(decision_name(ACCOUNT, "30001"), {
+            "account_id": ACCOUNT, "comment_id": "30001", "region": "토론토",
+            "account_username": "waterbomb_toronto_official", "author_username": "fan",
+            "text": "반복", "permalink": "https://www.instagram.com/p/abc/", "parent_id": "",
+            "written_at": "2026-11-12T06:10:00+00:00", "rule_id": "D11", "reason": "같은 작성자",
+            "confidence": "high", "status": "would_hide", "updated_at": "2026-11-12T07:00:00+00:00",
+            "sheet_synced_status": "숨겼을 것(시험)"}, 0)
+        state.json_put(decision_name(ACCOUNT, "99999"), {
+            "account_id": ACCOUNT, "comment_id": "99999", "region": "서울", "status": "hidden",
+            "confidence": "high", "rule_id": "K1", "reason": "기존", "text": "기존 댓글"}, 0)
+        first = backfill_sheet(state, sheet)
+        self.assertEqual(first["synced"], 2)
+        self.assertEqual([row[6] for row in sheet.data(HIDE_TAB)], ["99999", "30001"])
+        second = backfill_sheet(state, sheet)
+        self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
+        self.assertEqual(second["synced"], 2)
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][2], sheet.original[HIDE_TAB][2])
 
 
 if __name__ == "__main__":

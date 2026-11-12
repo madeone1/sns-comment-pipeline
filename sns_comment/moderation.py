@@ -14,7 +14,7 @@ import unicodedata
 
 from .api import GraphError, PilotError
 from .cloud_state import CloudError
-from .moderation_sheet import display_status, needs_sheet, sync_sheet
+from .moderation_sheet import display_status, needs_sheet, sync_sheet, tab_for
 from .screening import classify as screen_comment
 from .storage import timestamp
 
@@ -319,6 +319,8 @@ def _record(comment, choice, account_username, region, book, sha, status, attemp
         "author_id": comment.get("author_id") if isinstance(comment.get("author_id"), str) else (
             existing.get("author_id") if isinstance(existing, dict) and isinstance(existing.get("author_id"), str) else ""),
         "permalink": permalink,
+        "parent_id": comment.get("parent_id") if isinstance(comment.get("parent_id"), str) else (
+            existing.get("parent_id") if isinstance(existing, dict) and isinstance(existing.get("parent_id"), str) else ""),
         "written_at": comment.get("written_at") if isinstance(comment.get("written_at"), str) else (
             existing.get("written_at") if isinstance(existing, dict) and isinstance(existing.get("written_at"), str) else ""),
         "text": comment.get("text") if isinstance(comment.get("text"), str) else "",
@@ -361,9 +363,9 @@ SHEET_PENDING = "moderation/sheet-pending.json"
 
 
 def _sheet_snapshot(record):
-    keys = ("account_id", "comment_id", "region", "account_username", "author_username", "permalink",
-            "text", "rule_id", "reason", "confidence", "status", "error", "updated_at", "classified_at",
-            "sheet_synced_status")
+    keys = ("account_id", "comment_id", "region", "account_username", "author_username", "author_id",
+            "permalink", "parent_id", "written_at", "text", "rule_id", "reason", "confidence", "status",
+            "error", "hidden_check", "updated_at", "classified_at", "sheet_synced_status")
     snap = {key: record.get(key) for key in keys}
     snap["decision"] = decision_name(record["account_id"], record["comment_id"])
     return snap
@@ -412,6 +414,39 @@ def flush_sheet_log(state, client):
     current["items"] = items
     _put(state, SHEET_PENDING, current, generation)
     return reflected
+
+
+def iter_decisions(state):
+    if hasattr(state, "list_all"):
+        objects = state.list_all("moderation/decisions/")
+    else:
+        objects, _more = state.list_objects("moderation/decisions/", 1000)
+    for obj in objects:
+        name = obj.get("name") if isinstance(obj, dict) else None
+        if not isinstance(name, str) or not name.endswith(".json"):
+            continue
+        record, generation = state.json_get(name)
+        if isinstance(record, dict) and record.get("comment_id"):
+            yield name, generation, record
+
+
+def backfill_sheet(state, client):
+    """Replay stored decisions onto the rulebook tabs. Existing comment IDs are not written again."""
+    located, records = [], []
+    for name, generation, record in iter_decisions(state):
+        if tab_for(record) and display_status(record):
+            located.append((name, generation, record))
+            records.append(record)
+    reflected = sync_sheet(client, records) if records else []
+    done = {(item.get("account_id"), item.get("comment_id")) for item in reflected}
+    marked = 0
+    for name, generation, record in located:
+        if (record.get("account_id"), record.get("comment_id")) not in done:
+            continue
+        record["sheet_synced_status"] = display_status(record)
+        _put(state, name, record, generation)
+        marked += 1
+    return {"seen": len(records), "synced": marked}
 
 
 def _put(state, name, value, generation):
@@ -494,6 +529,20 @@ def _apply_hide(client, comment_id):
     return client.hide_comment(comment_id)
 
 
+def _hidden_check(client, comment_id):
+    if client is None or not hasattr(client, "get"):
+        return "hidden 확인 실패"
+    try:
+        checked = client.get(comment_id, fields="hidden")
+    except (GraphError, PilotError):
+        return "hidden 확인 실패"
+    if isinstance(checked, dict) and checked.get("hidden") is True:
+        return "hidden=true"
+    if isinstance(checked, dict) and checked.get("hidden") is False:
+        return "hidden=false"
+    return "hidden 확인 실패"
+
+
 def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None):
     """Record every decision. POST hide=true only for a high-confidence 숨김 when hiding is enabled."""
     mod = settings.get("moderation") or {}
@@ -552,6 +601,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
                 try:
                     _apply_hide(client, comment["id"])
                     status = "hidden"
+                    extra["hidden_check"] = _hidden_check(client, comment["id"])
                 except GraphError as error:
                     status = "hide_failed"
                     extra["error"] = "API 호출 제한" if _rate_limited(error) else "숨김 요청 실패"
@@ -584,6 +634,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
             attempts += 1
             try:
                 _apply_hide(client, comment["id"])
+                extra["hidden_check"] = _hidden_check(client, comment["id"])
             except GraphError as error:
                 status = "hide_failed"
                 extra["error"] = "API 호출 제한" if _rate_limited(error) else "숨김 요청 실패"
@@ -595,6 +646,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
                 extra["error"] = str(error)
         else:
             extra["hidden_by"] = "already"
+            extra["hidden_check"] = "hidden=true"
         record = _record(comment, choice, account_username, region, book, sha, status, attempts,
                          human=existing.get("human_decision"), extra=extra, existing=existing)
         record["classified_at"] = existing.get("classified_at") or record["classified_at"]
