@@ -112,6 +112,9 @@
     "interval_minutes": 10,
     "max_age_minutes": 20,
     "media_limit": 8,
-    "batch_size": 20
+    "batch_size": 20,
+    "sheet": {
+      "spreadsheet_id": "1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY"
+    }
   }
 }

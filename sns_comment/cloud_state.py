@@ -102,6 +102,21 @@ class CloudState:
                  for r in value.get('items', [])]
         return items, bool(value.get('nextPageToken'))
 
+    def list_all(self, prefix, page_size=200):
+        items, token = [], None
+        while True:
+            query = {'prefix': self.prefix + prefix, 'maxResults': page_size,
+                     'fields': 'items(name,generation),nextPageToken'}
+            if token:
+                query['pageToken'] = token
+            value = self.transport.json('GET', 'https://storage.googleapis.com/storage/v1/b/' + self.bucket + '/o?'
+                                        + urllib.parse.urlencode(query))
+            for row in value.get('items', []):
+                items.append({'name': row['name'][len(self.prefix):], 'generation': int(row['generation'])})
+            token = value.get('nextPageToken')
+            if not token:
+                return items
+
     def delete(self, name, generation):
         self.transport.request('DELETE', self.url(name, ifGenerationMatch=generation))
 
