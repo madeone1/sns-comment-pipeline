@@ -270,14 +270,17 @@ class SweepTests(unittest.TestCase):
     def test_daily_rows_for_a_new_account_are_classified_without_hiding(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "comments.sqlite3")
-            store.db.execute("INSERT INTO media(account_id,id,permalink,raw_json) VALUES(?,?,?,?)",
-                             (SEOUL, "200", "https://www.instagram.com/p/abc/", "{}"))
-            store.db.execute("""INSERT INTO comments(account_id,id,media_id,parent_id,author_id,username,is_owner,text,
-                written_at,first_seen_at,last_seen_at,payload_hash,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (SEOUL, "30021", "200", None, "9", "fan", 0, "줄이 너무 길어요", "2026-11-12T06:00:00+00:00",
-                 "2026-11-12T06:01:00+00:00", "2026-11-12T06:01:00+00:00", "hash", "{}"))
-            store.db.commit()
-            rows = recent_rows(store, SEOUL, "2026-11-12T08:00:00+09:00", 100)
+            try:
+                store.db.execute("INSERT INTO media(account_id,id,permalink,raw_json) VALUES(?,?,?,?)",
+                                 (SEOUL, "200", "https://www.instagram.com/p/abc/", "{}"))
+                store.db.execute("""INSERT INTO comments(account_id,id,media_id,parent_id,author_id,username,is_owner,text,
+                    written_at,first_seen_at,last_seen_at,payload_hash,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (SEOUL, "30021", "200", None, "9", "fan", 0, "줄이 너무 길어요", "2026-11-12T06:00:00+00:00",
+                     "2026-11-12T06:01:00+00:00", "2026-11-12T06:01:00+00:00", "hash", "{}"))
+                store.db.commit()
+                rows = recent_rows(store, SEOUL, "2026-11-12T08:00:00+09:00", 100)
+            finally:
+                store.close()
         self.assertEqual([row["id"] for row in rows], ["30021"])
         model = Model({"30021": {**answer("유지", "K7", reason="현장 불만"), "id": "30021"}})
         client = Hides()
