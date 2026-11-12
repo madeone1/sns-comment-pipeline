@@ -100,8 +100,6 @@ def pending_comments(state, client, account_id, owner):
                 raise
             continue
         comment = comment_from_payload(item, account_id, owner, event.get("media_id"))
-        if not comment.get("written_at") and isinstance(event.get("received_at"), str):
-            comment["written_at"] = event["received_at"]
         found.append(comment)
     return attach_permalinks(client, found)
 

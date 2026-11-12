@@ -524,6 +524,30 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(second["synced"], 2)
         self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][2], sheet.original[HIDE_TAB][2])
 
+    def test_instagram_comment_time_is_stored_and_older_records_stay_blank(self):
+        from sns_comment.moderation_job import comment_from_payload
+        parsed = comment_from_payload(
+            {"id": "18111760985229472", "text": "안녕", "timestamp": "2026-11-11T21:41:00+0000",
+             "username": "fan", "from": {"id": "55", "username": "fan"}},
+            ACCOUNT, "waterbomb_toronto_official", "20001")
+        self.assertTrue(parsed["written_at"].startswith("2026-11-11T21:41:00"))
+        state, sheet = MemoryState(), FakeSheets()
+        comment = audience("안녕", "18111760985229472", written="2026-11-11T21:41:00+0000", username="fan")
+        model = Model({"18111760985229472": {**answer("사람판단", "H1", confidence="low", reason="애매"), "id": "18111760985229472"}})
+        moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
+                 region="토론토", sheet_client=sheet)
+        stored = state.data[decision_name(ACCOUNT, "18111760985229472")]
+        self.assertTrue(stored["written_at"].startswith("2026-11-11T21:41:00"))
+        self.assertEqual(sheet.data(REVIEW_TAB)[-1][2], "2026-11-12 06:41")
+        state.json_put(decision_name(ACCOUNT, "17936497245410609"), {
+            "account_id": ACCOUNT, "comment_id": "17936497245410609", "region": "서울",
+            "account_username": "waterbomb_official", "author_username": "fan", "text": "예전",
+            "status": "would_hide", "confidence": "high", "rule_id": "D9", "reason": "예전 기록",
+            "updated_at": "2026-11-12T07:00:00+00:00"}, 0)
+        backfill_sheet(state, sheet)
+        old = [row for row in sheet.data(HIDE_TAB) if len(row) > 6 and row[6] == "17936497245410609"]
+        self.assertEqual(old[0][2], "")
+
 
 if __name__ == "__main__":
     unittest.main()

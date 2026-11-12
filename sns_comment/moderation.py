@@ -299,6 +299,19 @@ def _status_for(choice):
     return "kept"
 
 
+def _stored_written_at(comment, existing):
+    """Keep the Instagram comment time. A missing value stays blank; do not invent one."""
+    raw = comment.get("written_at") if isinstance(comment, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        raw = existing.get("written_at") if isinstance(existing, dict) else ""
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        return timestamp(raw.strip())
+    except PilotError:
+        return ""
+
+
 def _record(comment, choice, account_username, region, book, sha, status, attempts, human=None, extra=None, existing=None):
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     author = comment.get("username") if isinstance(comment.get("username"), str) else ""
@@ -321,8 +334,7 @@ def _record(comment, choice, account_username, region, book, sha, status, attemp
         "permalink": permalink,
         "parent_id": comment.get("parent_id") if isinstance(comment.get("parent_id"), str) else (
             existing.get("parent_id") if isinstance(existing, dict) and isinstance(existing.get("parent_id"), str) else ""),
-        "written_at": comment.get("written_at") if isinstance(comment.get("written_at"), str) else (
-            existing.get("written_at") if isinstance(existing, dict) and isinstance(existing.get("written_at"), str) else ""),
+        "written_at": _stored_written_at(comment, existing),
         "text": comment.get("text") if isinstance(comment.get("text"), str) else "",
         "text_hash": text_hash(comment.get("text")),
         "label": choice["label"],
