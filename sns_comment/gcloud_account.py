@@ -51,7 +51,7 @@ def gcloud_argv(args, project=None, account=None):
 
 def run_gcloud(args, project=None, account=None, **kwargs):
     if shutil.which('gcloud') is None:
-        raise PilotError('Google Cloud CLI가 필요합니다. 설치 후 이 파일을 다시 실행해주세요.')
+        raise PilotError('Google Cloud CLI가 필요합니다. 설치 후 이 파일을 다시 실행해주세요. https://cloud.google.com/sdk/docs/install')
     return subprocess.run(gcloud_argv(args, project=project, account=account), capture_output=True, text=True, **kwargs)
 
 

@@ -23,7 +23,7 @@
 
 ## 일반 운영
 
-토큰 변경은 `change-access-token.command`만 사용한다. 토큰을 환경 파일이나
+토큰 변경은 macOS에서 `change-access-token.command`, Windows에서 `change-access-token.bat`을 사용한다. 토큰을 환경 파일이나
 명령 인수에 넣지 않는다. 실행 파일은 현재 활성 회사 Google 계정으로 HTTPS API를
 호출해 Meta 접근을 확인하고 Secret Manager와 등록부를 갱신한 뒤 Cloud Run을
 시작한다. 사용 계정은 토큰 입력 전에 화면에 나온다. 로그인이 없거나 권한이

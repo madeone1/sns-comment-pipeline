@@ -170,6 +170,7 @@ class ActiveAccountSelectionTests(AuthDoubles):
         self.assertEqual(code, 1)
         prompt.assert_not_called()
         self.assertIn('Google Cloud CLI가 필요합니다.', stderr.getvalue())
+        self.assertIn('https://cloud.google.com/sdk/docs/install', stderr.getvalue())
 
     def test_permission_failure_names_the_active_account_and_does_not_touch_the_network(self):
         self.use(stdout='synthetic-access-token\n', code=1, stderr='PERMISSION_DENIED synthetic-access-token')

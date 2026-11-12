@@ -1,15 +1,16 @@
 # 액세스 토큰 변경과 데이터 연결
 
-`change-access-token.command`를 열고 토큰을 숨김 입력한다. 별도 웹 서버를 실행하지 않는다. Google Cloud CLI에 로그인된 회사 계정을 사용한다. Secret Manager 비밀 `sns-meta-token`, 상태 버킷, Cloud Run Job `sns-comments-daily` 실행 권한이 있으면 된다. 예: `josh@madeone.kr`. 실행 시 사용 중인 계정을 먼저 보여 준다. 로그인이 없으면 `gcloud auth login`을 실행한다. 계정을 바꾸려면 `--account 이메일` 또는 환경변수 `SNS_GCLOUD_ACCOUNT`를 지정한다. `config.json`의 `cloud.account`가 비어 있으면 활성 계정을 쓰고, 이메일이 적혀 있으면 그 계정을 기본값으로만 쓴다. 플래그와 환경변수가 설정보다 우선한다. 토큰을 채팅·명령 인자·환경변수 파일에 붙여 넣지 않는다.
+macOS는 `change-access-token.command`, Windows는 `change-access-token.bat`을 열고 토큰을 숨김 입력한다. Windows에서는 Python 3.12 이상(https://www.python.org/downloads/windows/)과 Google Cloud CLI(https://cloud.google.com/sdk/docs/install)를 설치한 뒤, 새로 연 명령 프롬프트에서 `gcloud auth login josh@madeone.kr`을 실행하고 bat를 더블클릭하거나 `change-access-token.bat --check`로 확인만 한다. 추가 패키지나 가상환경은 없다. 별도 웹 서버를 실행하지 않는다. Google Cloud CLI에 로그인된 회사 계정을 사용한다. Secret Manager 비밀 `sns-meta-token`, 상태 버킷, Cloud Run Job `sns-comments-daily` 실행 권한이 있으면 된다. 예: `josh@madeone.kr`. 실행 시 사용 중인 계정을 먼저 보여 준다. 로그인이 없으면 `gcloud auth login`을 실행한다. 계정을 바꾸려면 `--account 이메일` 또는 환경변수 `SNS_GCLOUD_ACCOUNT`를 지정한다. `config.json`의 `cloud.account`가 비어 있으면 활성 계정을 쓰고, 이메일이 적혀 있으면 그 계정을 기본값으로만 쓴다. 플래그와 환경변수가 설정보다 우선한다. 토큰을 채팅·명령 인자·환경변수 파일에 붙여 넣지 않는다.
 
 기존 계정은 ID로 지역 표시명과 이력을 찾는다. 새 계정은 지역 표시명을 입력하며, 빈칸이면 이번 대상에서 제외한다. 이전에 제외한 계정을 다시 포함하려면 해당 계정의 지역명을 입력한다. `--region 계정ID=지역명`, `--exclude 계정ID`로도 지정할 수 있다. 검증 완료 후 바로 수집 작업을 시작하고 결과를 기다린다. 창을 닫아도 이미 시작한 클라우드 작업은 계속된다.
 
 | 실행 | 동작 |
 | --- | --- |
-| `./change-access-token.command` | 새 토큰 입력·검증·계정/지역 연결·수집·시트/노션 갱신·재조회 |
-| `./change-access-token.command --check` | 현재 저장 토큰의 실제 API 접근만 확인. 저장·수집 실행 없음 |
-| `./change-access-token.command --status` | 연결과 시트·노션의 반영 상태 확인 |
-| `./change-access-token.command --no-wait` | 정상 검증·저장 후 갱신 작업을 시작하고 종료 |
+| `./change-access-token.command` | macOS. 새 토큰 입력·검증·계정/지역 연결·수집·시트/노션 갱신·재조회 |
+| `change-access-token.bat` | Windows. 같은 동작. 더블클릭하거나 명령 프롬프트에서 실행 |
+| `./change-access-token.command --check` / `change-access-token.bat --check` | 현재 저장 토큰의 실제 API 접근만 확인. 저장·수집 실행 없음 |
+| `--status` | 연결과 시트·노션의 반영 상태 확인 |
+| `--no-wait` | 정상 검증·저장 후 갱신 작업을 시작하고 종료 |
 
 계정 목록의 페이지를 끝까지 조회한다. 일부 목록 API를 지원하지 않는 토큰은 지원되는 목록과 기존 계정 직접 조회를 함께 사용한다. 목록 누락만으로 접근 가능한 기존 계정을 제외하지 않는다. 페이지가 잘리거나 커서가 반복되거나 토큰·권한 검증이 실패하면 이전 연결을 유지한다. 실제 계정, 게시물, 댓글 GET을 검증한다. 게시물이 없는 계정은 댓글 조회가 검증됐다고 표시하지 않고 별도 상태로 남긴다.
 
