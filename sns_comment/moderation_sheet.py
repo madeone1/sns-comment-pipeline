@@ -122,6 +122,7 @@ def _note(record, hide_tab):
 
 def row_values(record, number):
     hide_tab = tab_for(record) == HIDE_TAB
+    # Column C is the Instagram comment time only. Records saved before that field existed stay blank.
     values = [str(number), account_tab(record), _clock(record.get("written_at")), record.get("author_username") or "",
               record.get("text") or "", record.get("permalink") or "", str(record.get("comment_id") or ""),
               record.get("parent_id") or "", record.get("rule_id") or "", record.get("reason") or "",
