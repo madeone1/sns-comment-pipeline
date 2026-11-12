@@ -47,11 +47,14 @@ function Find-Python312 {
 }
 
 function Find-Gcloud {
-    foreach ($name in @('gcloud', 'gcloud.cmd')) {
+    # Prefer gcloud.cmd. PowerShell's Get-Command gcloud selects gcloud.ps1,
+    # and the execution policy can block that script.
+    foreach ($name in @('gcloud.cmd', 'gcloud')) {
         $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command -and $command.Source -notlike '*\WindowsApps\*') {
-            return $command.Source
-        }
+        if (-not $command) { continue }
+        if ($command.Source -like '*\WindowsApps\*') { continue }
+        if ($command.Source -like '*.ps1') { continue }
+        return $command.Source
     }
     return $null
 }

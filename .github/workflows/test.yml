@@ -21,3 +21,15 @@ jobs:
           sudo apt-get install --yes zsh
       - name: Run unit and integration simulations
         run: python -m unittest discover -s tests -q
+
+  windows-unittest:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Import the token CLI
+        run: python -c "import sns_comment.token_cli"
+      - name: Run token CLI tests
+        run: python -m unittest tests.test_token_cli_auth tests.test_token_connections tests.test_token_pipeline tests.test_windows_launcher tests.test_windows_runtime tests.test_credentials tests.test_pipeline -q
