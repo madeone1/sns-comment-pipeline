@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import shutil
 import secrets
-import subprocess
 
 from cloud_common import PROJECT, REGION, gcloud
 
@@ -112,8 +111,7 @@ def configure():
         '--filter=state=ENABLED', '--limit=1', '--format=value(name)']).stdout.strip()
     if not current:
         token = secrets.token_urlsafe(48)
-        result = subprocess.run(['gcloud', 'secrets', 'versions', 'add', 'sns-webhook-verify-token', '--data-file=-',
-            '--project='+PROJECT, '--account=syan@madeone.kr', '--quiet'], input=token, capture_output=True, text=True)
+        result = gcloud(['secrets', 'versions', 'add', 'sns-webhook-verify-token', '--data-file=-'], optional=True, value=token)
         if result.returncode:
             raise SystemExit('웹훅 Verify Token 보관 실패. 비밀 값은 출력하지 않았습니다.')
     exclusion = plan['log_exclusion']

@@ -20,7 +20,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from sns_comment.api import https_context, NoRedirect
+from sns_comment.api import PilotError, https_context, NoRedirect
+from sns_comment.gcloud_account import resolve_operator, run_gcloud
 
 PROJECT = 'waterbomb-sns-pipeline'
 APP_ID = '1607262264749356'
@@ -29,9 +30,21 @@ PORT = 8796
 GUARD = secrets.token_urlsafe(32)
 
 
+_resolved = None
+
+
+def operator():
+    global _resolved
+    if _resolved is None:
+        email, explicit = resolve_operator(project=PROJECT)
+        print('Google Cloud 계정: ' + email, file=sys.stderr, flush=True)
+        _resolved = (email, email if explicit else None)
+    return _resolved
+
+
 def gcloud(args, value=None):
-    return subprocess.run(['gcloud', *args, '--project='+PROJECT, '--account=syan@madeone.kr', '--quiet'],
-        input=value, capture_output=True, text=True, timeout=60)
+    _, account = operator()
+    return run_gcloud(args, project=PROJECT, account=account, input=value, timeout=60)
 
 
 class Input(BaseHTTPRequestHandler):
@@ -101,12 +114,19 @@ class Input(BaseHTTPRequestHandler):
             (RELEASE/'app-secret-registration.json').write_text(json.dumps({'app_id': APP_ID, 'app_name': identity.get('name'),
                 'secret_version': info['name'], 'secret_value_logged': False}, ensure_ascii=False, indent=2))
             self.page(success=True)
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError):
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError, PilotError) as error:
+            if isinstance(error, PilotError):
+                print(str(error), file=sys.stderr)
             self.page('앱 시크릿 검증 또는 저장에 실패했습니다. 비밀 값은 출력하지 않았습니다.')
 
 
 if __name__ == '__main__':
     os.umask(0o077)
+    try:
+        operator()
+    except PilotError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from None
     (RELEASE/'setup-local.json').write_text(json.dumps({'url': f'http://127.0.0.1:{PORT}/setup/'+GUARD}))
     print(json.dumps({'listening': 'loopback only', 'port': PORT, 'secret_values_logged': False}), flush=True)
     HTTPServer(('127.0.0.1', PORT), Input).serve_forever()

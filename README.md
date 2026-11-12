@@ -21,15 +21,23 @@ flowchart LR
 ## 토큰 변경
 
 Python 3.12 이상과 Google Cloud CLI가 설치된 macOS에서 저장소를 내려받는다.
-회사 계정에 기존 클라우드 작업·상태 저장소·Secret Manager 접근 권한이 필요하다.
-개인 서비스 계정 키 파일을 내려받거나 저장소에 넣지 않는다.
+지금 로그인된 회사 Google 계정으로 실행한다.
+Secret Manager 비밀 `sns-meta-token`, 상태 버킷, Cloud Run Job 실행 권한이 필요하다.
+예: `josh@madeone.kr`. 개인 서비스 계정 키 파일을 내려받거나 저장소에 넣지 않는다.
 
 ```sh
 git clone git@github.com:madeone1/sns-comment-pipeline.git
 cd sns-comment-pipeline
-gcloud auth login syan@madeone.kr
+gcloud auth login
 ./change-access-token.command
 ```
+
+실행하면 사용 중인 Google 계정을 먼저 보여 준다. 다른 계정을 쓰려면
+`./change-access-token.command --account 이메일` 또는 환경변수
+`SNS_GCLOUD_ACCOUNT`를 지정한다. `config.json`의 `cloud.account`가 비어 있으면
+활성 계정을 쓰고, 이메일이 있으면 그 주소를 기본값으로만 쓴다. 플래그와
+환경변수가 설정보다 우선한다. 로그인이 없거나 권한이 없으면 토큰을 묻기 전에
+멈추고 `gcloud auth login`으로 다시 로그인하라고 안내한다.
 
 Finder에서 `change-access-token.command`를 열어도 된다. 토큰은 표시되지 않는
 입력란에 붙여 넣는다. 검증된 새 계정에만 지역 표시명을 한 번 지정한다.

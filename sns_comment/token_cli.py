@@ -5,8 +5,6 @@ import base64
 import datetime as dt
 import hmac
 import json
-import shutil
-import subprocess
 import sys
 import time
 
@@ -14,18 +12,20 @@ from .api import PilotError
 from .cloud_state import CloudState,GoogleTransport
 from .connection_registry import REGISTRY_OBJECT,initial_registry
 from .credentials import prompt_meta_token
+from .gcloud_account import announce,permission_help,resolve_operator,run_gcloud
 from .profiles import read_settings
 from .token_connections import STATUS_OBJECT,VerifiedPlan,digest,inspect_token,read_token,snapshot,source_secret
 
 
 class LocalTransport(GoogleTransport):
-    def __init__(self,project,account):
-        super().__init__();self.project=project;self.account=account
+    def __init__(self,project,account,explicit=False):
+        super().__init__();self.project=project;self.account=account;self.explicit=explicit
     def gcloud(self,args):
-        if not shutil.which('gcloud'):raise PilotError('Google Cloud CLI가 필요합니다. 설치 후 이 파일을 다시 실행해주세요.')
-        result=subprocess.run(['gcloud',*args,'--project='+self.project,'--account='+self.account,'--quiet'],capture_output=True,text=True)
+        # Pass --account only for an explicit override. Otherwise gcloud uses
+        # the active authorized account announced at startup.
+        result=run_gcloud(args,project=self.project,account=self.account if self.explicit else None)
         if result.returncode:
-            raise PilotError('Google Cloud 인증 또는 작업 권한을 확인해주세요. gcloud auth login '+self.account+' 실행 후 다시 시도해주세요.')
+            raise PilotError(permission_help(self.account,self.project))
         return result.stdout
     def token(self):
         if self._expires<time.time()+60:
@@ -90,6 +90,7 @@ def wait_for_delivery(transport,state,execution,region,revision,timeout=3600):
 def main(argv=None):
     parser=argparse.ArgumentParser(description='액세스 토큰 검증 → 계정·지역 연결 → 시트·노션 갱신')
     parser.add_argument('--config');parser.add_argument('--check',action='store_true',help='현재 저장 토큰을 검증, 저장·수집 실행 없음')
+    parser.add_argument('--account',help='Google Cloud 계정(이메일). 없으면 SNS_GCLOUD_ACCOUNT, 그다음 cloud.account, 없으면 현재 활성 계정')
     parser.add_argument('--status',action='store_true',help='현재 연결과 시트·노션 반영 상태 조회')
     parser.add_argument('--no-wait',action='store_true',help='갱신 작업을 시작한 뒤 종료')
     parser.add_argument('--adopt-current',action='store_true',help='기존 토큰의 검증된 계정 연결만 초기 등록')
@@ -98,8 +99,10 @@ def main(argv=None):
     parser.add_argument('--json',action='store_true',help='상태를 JSON으로 출력')
     args=parser.parse_args(argv)
     try:
-        settings=read_settings(args.config);project=settings['cloud']['project_id'];account=settings['cloud'].get('account','syan@madeone.kr')
-        transport=LocalTransport(project,account);state=CloudState(project+'-state',transport)
+        settings=read_settings(args.config);project=settings['cloud']['project_id']
+        account,explicit=resolve_operator(args.account,settings.get('cloud',{}).get('account'),project)
+        announce(account,project,explicit,sys.stderr if args.json else sys.stdout)
+        transport=LocalTransport(project,account,explicit);state=CloudState(project+'-state',transport)
         if args.status:
             status,_=state.json_get(STATUS_OBJECT,{})
             if args.json:print(json.dumps(status,ensure_ascii=False,indent=2))

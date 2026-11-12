@@ -70,7 +70,7 @@
       "waterbomb_official"
     ],
     "project_id": "waterbomb-sns-pipeline",
-    "account": "syan@madeone.kr",
+    "account": null,
     "region": "asia-northeast3",
     "ai_model": "gemini-3.8-flash",
     "refresh_known_tracking": true,

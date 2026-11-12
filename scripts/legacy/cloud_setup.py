@@ -9,7 +9,6 @@ import datetime as dt
 import json
 from pathlib import Path
 import sqlite3
-import subprocess
 import sys
 import tempfile
 
@@ -18,9 +17,9 @@ sys.path.insert(0,str(ROOT))
 from sns_comment.credentials import get_token,verify_meta_token
 from sns_comment.notion_oauth import read_local as read_notion_oauth
 from sns_comment.api import PilotError
+from sns_comment.gcloud_account import permission_help,resolve_operator,run_gcloud
 
 PROJECT = "waterbomb-sns-pipeline"
-ACCOUNT = "syan@madeone.kr"
 BILLING = "01152F-3EE377-FB410D"
 ORGANIZATION = "265289771512"
 REGION = "asia-northeast3"
@@ -31,14 +30,26 @@ BUILD = f"sns-build@{PROJECT}.iam.gserviceaccount.com"
 SCHEDULER = f"sns-scheduler@{PROJECT}.iam.gserviceaccount.com"
 
 
+_resolved = None
+
+
+def operator():
+    global _resolved
+    if _resolved is None:
+        email, explicit = resolve_operator(project=PROJECT)
+        print("Google Cloud 계정: "+email, file=sys.stderr, flush=True)
+        _resolved = (email, explicit)
+    return _resolved
+
+
 def run(args, value=None, optional=False):
-    command = ["gcloud",*args,"--account="+ACCOUNT,"--project="+PROJECT,"--quiet"]
-    result = subprocess.run(command,input=value,capture_output=True,text=True,cwd=ROOT)
+    email, explicit = operator()
+    result = run_gcloud(args, project=PROJECT, account=email if explicit else None, input=value, cwd=ROOT)
     if result.returncode and not optional:
-        # gcloud command arguments never include secrets. Secret payloads only
-        # enter stdin on the dedicated versions-add call.
-        print(result.stderr,file=sys.stderr)
-        raise PilotError("클라우드 단계 실패: "+" ".join(args[:3]))
+        # Secret payloads only enter stdin on the dedicated versions-add call.
+        if value is None and result.stderr:
+            print(result.stderr, file=sys.stderr)
+        raise PilotError(permission_help(email, PROJECT)+"\n클라우드 단계 실패: "+" ".join(args[:3]))
     return result
 
 
@@ -178,7 +189,7 @@ def main():
     parser.add_argument("action",choices=["plan","apply","deploy","activate","activate-merge","update-meta"],default="plan",nargs="?")
     action = parser.parse_args().action
     if action == "plan":
-        print(json.dumps({"project":PROJECT,"account":ACCOUNT,"billing_account":BILLING,"organization":ORGANIZATION,
+        print(json.dumps({"project":PROJECT,"account":"현재 활성 gcloud 계정 (SNS_GCLOUD_ACCOUNT로 지정 가능)","billing_account":BILLING,"organization":ORGANIZATION,
             "region":REGION,"job":JOB,"buckets":[PROJECT+"-state",PROJECT+"-build"],
             "service_accounts":[RUNTIME,BUILD,SCHEDULER],"secrets":["sns-meta-token","sns-notion-oauth"],
             "notion_auth":"파이프라인 전용 Notion MCP OAuth, 자동 갱신 결과는 Secret Manager에 보존",

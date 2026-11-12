@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 
@@ -30,10 +29,8 @@ RELEASE = ROOT/'.local/comment-windows-release'
 class UserTransport(GoogleTransport):
     def token(self):
         if self._token is None:
-            p = subprocess.run(['gcloud', 'auth', 'print-access-token', '--account=syan@madeone.kr'], capture_output=True, text=True)
-            if p.returncode:
-                raise SystemExit('클라우드 인증 확인 실패. 비밀 값은 출력하지 않았습니다.')
-            self._token = p.stdout.strip()
+            result = gcloud(['auth', 'print-access-token'])
+            self._token = result.stdout.strip()
         return self._token
 
 
