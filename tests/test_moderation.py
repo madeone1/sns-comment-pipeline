@@ -71,9 +71,13 @@ class Hides:
         return {"success": True}
 
 
-def audience(text, comment_id="30001", account=ACCOUNT, owner=0, written="2026-11-12T06:10:00+00:00", media="20001"):
-    return {"id": comment_id, "account_id": account, "media_id": media, "text": text, "is_owner": owner,
-            "written_at": written, "username": "fan"}
+def audience(text, comment_id="30001", account=ACCOUNT, owner=0, written="2026-11-12T06:10:00+00:00", media="20001",
+             username="fan", author_id=None):
+    row = {"id": comment_id, "account_id": account, "media_id": media, "text": text, "is_owner": owner,
+           "written_at": written, "username": username}
+    if author_id:
+        row["author_id"] = author_id
+    return row
 
 
 def answer(label, rule_id, confidence="high", reason="모델 판정"):
@@ -90,6 +94,10 @@ class RuleOrderTests(unittest.TestCase):
         self.assertLess(text.index("D1"), text.index("H1"))
         self.assertLess(text.index("H1"), text.index("K1"))
         self.assertIn("폐지", text)
+        self.assertIn("같은 작성자", text)
+        d11 = next(rule for rule in book["rules"] if rule["id"] == "D11")
+        self.assertIn("같은 작성자", d11["definition"])
+        self.assertIn("다른 사람", d11["exceptions"])
         self.assertEqual(book["labels"]["삭제"], "숨김")
 
     def test_official_empty_and_slur_rules_run_before_the_model(self):
@@ -125,6 +133,57 @@ class RuleOrderTests(unittest.TestCase):
         self.assertEqual(stored["rule_id"], "D11")
         self.assertEqual(stored["status"], "would_hide")
         self.assertEqual(stored["region"], "토론토")
+
+    def test_same_author_later_copies_are_d11_and_other_authors_are_kept(self):
+        state, model, client = MemoryState(), Model({}), Hides()
+        first = audience("@x.in_official", "30031", written="2026-11-12T06:00:00+00:00", username="_capybara.capybara_", author_id="101")
+        second = audience("@x.in_official", "30032", written="2026-11-12T06:01:00+00:00", username="_capybara.capybara_", author_id="101")
+        third = audience("@x.in_official", "30033", written="2026-11-12T06:02:00+00:00", username="_capybara.capybara_", author_id="101")
+        others = [
+            audience("@x.in_official", "30034", written="2026-11-12T06:03:00+00:00", username="zezo_lessico", author_id="102"),
+            audience("@x.in_official", "30035", written="2026-11-12T06:04:00+00:00", username="xin_readyskiteam_russia", author_id="103"),
+            audience("News", "30036", written="2026-11-12T06:05:00+00:00", username="one_fan", author_id="201"),
+            audience("News", "30037", written="2026-11-12T06:06:00+00:00", username="two_fan", author_id="202"),
+        ]
+        for comment in (first, *others):
+            model.answers[comment["id"]] = {**answer("유지", "K1"), "id": comment["id"]}
+        result = moderate([third, second, *others, first], state, DRY, model, client=client,
+                          account_username="waterbomb_toronto_official", region="토론토")
+        self.assertEqual(set(model.seen), {"30031", "30034", "30035", "30036", "30037"})
+        self.assertEqual(result["would_hide"], 2)
+        self.assertEqual(result["kept"], 5)
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30032")]["rule_id"], "D11")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30033")]["rule_id"], "D11")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30034")]["label"], "유지")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30037")]["label"], "유지")
+
+    def test_a_later_run_hides_only_the_same_authors_next_copy(self):
+        state, model, client = MemoryState(), Model({}), Hides()
+        first = audience("PLEASE X:IN @x.in_official", "30041", written="2026-11-12T06:00:00+00:00",
+                         username="readyxin01", author_id="301")
+        model.answers["30041"] = {**answer("유지", "K1"), "id": "30041"}
+        moderate([first], state, DRY, model, client=client, account_username="waterbomb_toronto_official", region="토론토")
+        repeat = audience("PLEASE X:IN @x.in_official", "30042", written="2026-11-12T07:00:00+00:00",
+                          username="readyxin01", author_id="301")
+        altered = audience("PLEASE X:IN", "30043", written="2026-11-12T07:05:00+00:00", username="readyxin01", author_id="301")
+        model.answers["30043"] = {**answer("유지", "K1"), "id": "30043"}
+        result = moderate([repeat, altered], state, DRY, model, client=client,
+                          account_username="waterbomb_toronto_official", region="토론토")
+        self.assertEqual(model.seen, ["30041", "30043"])
+        self.assertEqual(result["would_hide"], 1)
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30042")]["rule_id"], "D11")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30043")]["label"], "유지")
+
+    def test_same_author_id_matches_even_when_the_username_changes(self):
+        state, model = MemoryState(), Model({})
+        first = audience("Xin", "30051", written="2026-11-12T06:00:00+00:00", username="ReadyXin", author_id="401")
+        model.answers["30051"] = {**answer("유지", "K1"), "id": "30051"}
+        moderate([first], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official")
+        later = audience("Xin", "30052", written="2026-11-12T06:10:00+00:00", username="readyxin", author_id="401")
+        result = moderate([later], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official")
+        self.assertEqual(model.seen, ["30051"])
+        self.assertEqual(result["would_hide"], 1)
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30052")]["rule_id"], "D11")
 
 
 class HideGateTests(unittest.TestCase):

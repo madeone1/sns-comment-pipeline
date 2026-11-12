@@ -66,6 +66,7 @@ def prompt_for(book):
     lines.append("H2는 폐지되었다. H2를 출력하지 않는다. 확신이 낮거나 규칙이 충돌하면 사람판단과 H1을 출력한다.")
     lines.append("각 댓글은 id, label, rule_id, reason, confidence를 가진 JSON 배열로만 반환한다. confidence는 high 또는 low다.")
     lines.append("reason은 40자 안팎의 한국어다. 이모지는 뜻 없는 것으로 보고 글자만 본다. 이모지만 있으면 K1이다.")
+    lines.append("D11은 같은 작성자가 같은 글을 다시 올린 경우만이다. 다른 작성자가 같은 글을 한 번씩 쓴 것은 유지다. 공백을 접고 대소문자만 무시한 완전 일치를 본다.")
     for rule in book["rules"]:
         lines.append(f"{rule['id']} {rule['label']} {rule['name']}: {rule['definition']} 예외: {rule['exceptions']}")
     return "\n".join(lines)
@@ -144,15 +145,48 @@ def finalize(item, book):
     return _decision(KEEP_LABEL, rule_id, reason[:80], "high", "model")
 
 
-def repeat_key(comment):
-    text = comment.get("text")
-    if not isinstance(text, str) or not text.strip() or emoji_only(text):
-        return None
-    return (str(comment.get("media_id") or ""), plain(text))
+def author_tokens(comment):
+    """Same author means the same from.id or the same username. Missing identity is not shared."""
+    tokens = []
+    author_id = comment.get("author_id")
+    if isinstance(author_id, str) and author_id.strip():
+        tokens.append("id:" + author_id.strip())
+    username = comment.get("username") if isinstance(comment.get("username"), str) else comment.get("author_username")
+    if isinstance(username, str) and username.strip():
+        tokens.append("name:" + plain(username))
+    return tokens
 
 
-def classify_comments(comments, model, book, batch_size=20):
-    """Apply guard order, then one model batch for the rest. Repeats do not call the model again."""
+def repeat_slots(comment):
+    """Exact text after trim and casefold, on one post, from one author."""
+    text = comment.get("text") if isinstance(comment.get("text"), str) else ""
+    if not text.strip() or emoji_only(text):
+        return []
+    tokens = author_tokens(comment)
+    if not tokens:
+        return []
+    digest = comment.get("text_hash") or text_hash(text)
+    media = str(comment.get("media_id") or "")
+    account = str(comment.get("account_id") or "")
+    return [account + "\t" + media + "\t" + token + "\t" + digest for token in tokens]
+
+
+def _copy_time(value):
+    return (str(value.get("written_at") or value.get("classified_at") or ""), str(value.get("comment_id") or value.get("id") or ""))
+
+
+def _repeat_choice(earlier, decided):
+    first = decided.get(earlier.get("comment_id")) if earlier.get("in_batch") else None
+    rule_id = first.get("rule_id") if first else earlier.get("rule_id")
+    label = first.get("label") if first else earlier.get("label")
+    if label == HIDE_LABEL and rule_id and rule_id != "D11":
+        return _decision(HIDE_LABEL, rule_id, "같은 작성자의 반복입니다.", "high", "guard")
+    return _decision(HIDE_LABEL, "D11", "같은 작성자의 반복입니다.", "high", "guard")
+
+
+def classify_comments(comments, model, book, batch_size=20, prior=None):
+    """Apply guard order, then one model batch for the rest. Same-author repeats do not call the model again."""
+    prior = prior or {}
     ordered = sorted(comments, key=lambda row: (str(row.get("written_at") or ""), str(row.get("id") or "")))
     decided, pending = {}, []
     for comment in ordered:
@@ -164,13 +198,21 @@ def classify_comments(comments, model, book, batch_size=20):
     firsts, repeats = [], []
     seen = {}
     for comment in pending:
-        key = repeat_key(comment)
-        if key and key in seen:
-            repeats.append((comment, seen[key]))
-        else:
-            if key:
-                seen[key] = comment["id"]
-            firsts.append(comment)
+        earlier = None
+        for key in repeat_slots(comment):
+            entry = prior.get(key) or seen.get(key)
+            if isinstance(entry, dict) and entry.get("comment_id") != comment["id"] and _copy_time(comment) > _copy_time(entry):
+                earlier = entry
+                break
+        if earlier:
+            repeats.append((comment, earlier))
+            continue
+        marker = {"comment_id": comment["id"], "written_at": comment.get("written_at") or "", "in_batch": True}
+        for key in repeat_slots(comment):
+            current = seen.get(key)
+            if not isinstance(current, dict) or _copy_time(marker) < _copy_time(current):
+                seen[key] = marker
+        firsts.append(comment)
     usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     if firsts:
         instruction = prompt_for(book)
@@ -186,13 +228,57 @@ def classify_comments(comments, model, book, batch_size=20):
                         by_id[str(item["id"])] = item
             for comment in chunk:
                 decided[comment["id"]] = finalize(by_id.get(str(comment["id"])), book)
-    for comment, first_id in repeats:
-        first = decided[first_id]
-        if first["label"] == HIDE_LABEL:
-            decided[comment["id"]] = _decision(HIDE_LABEL, first["rule_id"], "같은 글의 반복입니다.", "high", "guard")
-        else:
-            decided[comment["id"]] = _decision(HIDE_LABEL, "D11", "같은 글의 반복입니다.", "high", "guard")
+    for comment, earlier in repeats:
+        decided[comment["id"]] = _repeat_choice(earlier, decided)
     return decided, usage
+
+
+def _merge_copy(entries, record):
+    changed = False
+    for key in repeat_slots(record):
+        current = entries.get(key)
+        entry = {"comment_id": record.get("comment_id") or record.get("id"),
+                 "written_at": record.get("written_at") or record.get("classified_at") or "",
+                 "label": record.get("label"), "rule_id": record.get("rule_id")}
+        if not isinstance(current, dict) or _copy_time(entry) < _copy_time(current):
+            entries[key] = entry
+            changed = True
+    return changed
+
+
+def _prior_copies(state, account_id):
+    """Earlier copies of the same author and text, including decisions saved on previous runs."""
+    name = "moderation/repeat-index/" + account_id + ".json"
+    current, generation = state.json_get(name, {"entries": {}})
+    entries = dict(current.get("entries") or {}) if isinstance(current, dict) else {}
+    changed = False
+    objects, _ = state.list_objects("moderation/decisions/" + account_id + "/", 200)
+    for obj in objects:
+        record, _gen = state.json_get(obj["name"])
+        if isinstance(record, dict) and _merge_copy(entries, record):
+            changed = True
+    if changed:
+        _put(state, name, {"entries": entries}, generation)
+    return entries
+
+
+def _remember_copies(state, records):
+    grouped = {}
+    for record in records:
+        account_id = record.get("account_id")
+        if isinstance(account_id, str):
+            grouped.setdefault(account_id, []).append(record)
+    for account_id, group in grouped.items():
+        name = "moderation/repeat-index/" + account_id + ".json"
+        current, generation = state.json_get(name, {"entries": {}})
+        if not isinstance(current, dict):
+            current = {"entries": {}}
+        entries = current.setdefault("entries", {})
+        changed = False
+        for record in group:
+            changed = _merge_copy(entries, record) or changed
+        if changed:
+            _put(state, name, current, generation)
 
 
 def hiding_enabled(settings):
@@ -230,7 +316,11 @@ def _record(comment, choice, account_username, region, book, sha, status, attemp
         "comment_id": comment["id"],
         "media_id": comment.get("media_id"),
         "author_username": author,
+        "author_id": comment.get("author_id") if isinstance(comment.get("author_id"), str) else (
+            existing.get("author_id") if isinstance(existing, dict) and isinstance(existing.get("author_id"), str) else ""),
         "permalink": permalink,
+        "written_at": comment.get("written_at") if isinstance(comment.get("written_at"), str) else (
+            existing.get("written_at") if isinstance(existing, dict) and isinstance(existing.get("written_at"), str) else ""),
         "text": comment.get("text") if isinstance(comment.get("text"), str) else "",
         "text_hash": text_hash(comment.get("text")),
         "label": choice["label"],
@@ -442,7 +532,10 @@ def moderate(comments, state, settings, model, client=None, account_username="",
     written = []
     stop_hide = False
     if classify:
-        decided, usage = classify_comments(classify, model, book, size)
+        prior = {}
+        for account_id in {comment["account_id"] for comment in classify}:
+            prior.update(_prior_copies(state, account_id))
+        decided, usage = classify_comments(classify, model, book, size, prior=prior)
         for key, value in usage.items():
             summary["usage"][key] += value
         for comment in classify:
@@ -508,6 +601,8 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         _put(state, name, record, generation)
         summary[status] += 1
         written.append(record)
+    if written:
+        _remember_copies(state, written)
     if written or summary["usage"]["calls"]:
         _store_daily(state, written, summary["usage"])
     sheet_records.extend(written)
