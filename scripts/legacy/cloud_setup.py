@@ -147,7 +147,7 @@ def activate():
     proof = ROOT/".local/cloud-smoke-verification.json"
     if not proof.exists():
         raise PilotError("실제 클라우드 실행과 Notion 기록 검증 전에는 예약을 활성화하지 않습니다.")
-    verified = json.loads(proof.read_text())
+    verified = json.loads(proof.read_text(encoding="utf-8"))
     if verified.get("project") != PROJECT or verified.get("cloud_execution_succeeded") is not True or verified.get("notion_verified") is not True:
         raise PilotError("클라우드 실행·Notion 기록 검증 결과가 맞지 않습니다.")
     uri = f"https://run.googleapis.com/v2/projects/{PROJECT}/locations/{REGION}/jobs/{JOB}:run"
@@ -169,10 +169,10 @@ def update_meta():
 def activate_merge():
     native = ROOT/".local/recovery-2026-11-09/native-merge-smoke-verification.json"
     cloud = ROOT/".local/recovery-2026-11-09/cloud-daily-merge-verification.json"
-    native_proof = json.loads(native.read_text()) if native.exists() else {}
+    native_proof = json.loads(native.read_text(encoding="utf-8")) if native.exists() else {}
     if native_proof.get("status") != "verified" or not native_proof.get("cleanup") or not all(native_proof["cleanup"].values()):
         raise PilotError("실제 템플릿 복사본의 보존·복구 검증이 필요합니다.")
-    proof = json.loads(cloud.read_text()) if cloud.exists() else {}
+    proof = json.loads(cloud.read_text(encoding="utf-8")) if cloud.exists() else {}
     if proof.get("project") != PROJECT or proof.get("merge_only_execution_succeeded") is not True or proof.get("daily_merge_apply_enabled") is not True:
         raise PilotError("클라우드 병합 전용 실행 검증 후 예약을 활성화합니다.")
     uri = f"https://run.googleapis.com/v2/projects/{PROJECT}/locations/{REGION}/jobs/{MERGE_JOB}:run"

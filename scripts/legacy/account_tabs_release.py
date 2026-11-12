@@ -24,11 +24,11 @@ SHEET = '184SNRc-z2MfVKcsaKeZcR9kMrYBv1l5Y8JlswXs6210'
 
 
 def save(name, value):
-    (RELEASE / (name + '.json')).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    (RELEASE / (name + '.json')).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding="utf-8")
 
 
 def read(name):
-    return json.loads((RELEASE / (name + '.json')).read_text())
+    return json.loads((RELEASE / (name + '.json')).read_text(encoding="utf-8"))
 
 
 def prepare():
@@ -44,7 +44,7 @@ def prepare():
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     for name in ['Dockerfile', 'Dockerfile.web', 'web-requirements.txt', '.dockerignore', '.gcloudignore']:
         shutil.copy2(ROOT / name, folder / name)
-    (folder / 'config.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n')
+    (folder / 'config.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n', encoding="utf-8")
     tag = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S') + '-account-tabs'
     base = REGION + '-docker.pkg.dev/' + PROJECT + '/containers/'
     images = {'worker': base + 'sns-comments:' + tag, 'web': base + 'sns-comments-web:' + tag}
@@ -126,7 +126,7 @@ def seed():
     import sys
     sys.path.insert(0, str(ROOT))
     from sns_comment.web_registry import initial_registry
-    registry = initial_registry(json.loads((RELEASE / 'context/config.json').read_text()))
+    registry = initial_registry(json.loads((RELEASE / 'context/config.json').read_text(encoding="utf-8")))
     save('registry-seed', registry)
     # The generation guard forbids replacing a registry created meanwhile.
     result = gcloud(['storage', 'cp', str(RELEASE / 'registry-seed.json'),
@@ -147,7 +147,7 @@ def deploy():
         'SNS_WEB_IAP_AUDIENCE': f'/projects/{number}/locations/{REGION}/services/sns-comments-web',
         'SNS_WEB_ORIGIN': 'https://deployment-pending.invalid'}
     env_file = RELEASE / 'web-env.yaml'
-    env_file.write_text('\n'.join(k + ': ' + json.dumps(v) for k, v in env.items()) + '\n')
+    env_file.write_text('\n'.join(k + ': ' + json.dumps(v) for k, v in env.items()) + '\n', encoding="utf-8")
     gcloud(['run', 'deploy', 'sns-comments-web', '--region=' + REGION, '--image=' + release['images']['web'],
         '--service-account=' + WEB, '--cpu=1', '--memory=512Mi', '--min-instances=0', '--max-instances=2',
         '--concurrency=8', '--timeout=120s', '--cpu-throttling', '--no-allow-unauthenticated', '--iap',

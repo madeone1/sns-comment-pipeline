@@ -37,7 +37,7 @@ class UserTransport(GoogleTransport):
 def backfill(day, apply=False):
     os.umask(0o077)
     RELEASE.mkdir(parents=True, exist_ok=True)
-    settings = json.loads((ROOT/'.local/web-release/operational-config.json').read_text())
+    settings = json.loads((ROOT/'.local/web-release/operational-config.json').read_text(encoding="utf-8"))
     shared = CloudState(PROJECT+'-state', UserTransport())
     instant = dt.datetime.fromisoformat(day+'T08:00:00+09:00')
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -70,8 +70,8 @@ def backfill(day, apply=False):
                     'basis': 'comment_written_at', 'media_age_restricted': False,
                     'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'analysis_state': 'rebuild_required',
                     'reprojection': {'reason': 'user_requested_comment_written_windows', 'previous_generation': generation}}
-                (RELEASE/(name+'-source-before.json')).write_text(json.dumps(old, ensure_ascii=False, indent=2))
-                (RELEASE/(name+'-source-after.json')).write_text(json.dumps(value, ensure_ascii=False, indent=2))
+                (RELEASE/(name+'-source-before.json')).write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+                (RELEASE/(name+'-source-after.json')).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
                 result = {'account':name,'daily_before':len(before_ids),'daily_after':len(after_ids),
                     'added_ids':sorted(after_ids-before_ids),'rolling_week':len(week['comments']), 'applied':False}
                 if apply:
@@ -82,26 +82,26 @@ def backfill(day, apply=False):
                         raise SystemExit('목록 저장 후 대조 실패: '+name)
                     result.update(applied=True,generation=new_generation)
                 results.append(result)
-    (RELEASE/('backfill-applied.json' if apply else 'backfill-preview.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2))
+    (RELEASE/('backfill-applied.json' if apply else 'backfill-preview.json')).write_text(json.dumps(results,ensure_ascii=False,indent=2), encoding="utf-8")
     print(json.dumps(results,ensure_ascii=False,indent=2))
 
 
 def prepare():
     RELEASE.mkdir(parents=True, exist_ok=True)
-    settings = json.loads((ROOT/'.local/web-release/operational-config.json').read_text())
+    settings = json.loads((ROOT/'.local/web-release/operational-config.json').read_text(encoding="utf-8"))
     settings.setdefault('cloud', {}).update(webhook_enabled=True, comment_written_windows=True, historical_baseline_requests=1000)
     folder=RELEASE/'context';folder.mkdir(parents=True,exist_ok=True)
     shutil.copytree(ROOT/'sns_comment',folder/'sns_comment',dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     for name in ['Dockerfile','Dockerfile.web','web-requirements.txt','.dockerignore','.gcloudignore']:
         shutil.copy2(ROOT/name,folder/name)
-    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n')
+    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n', encoding="utf-8")
     tag=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')+'-comment-windows'
     base=REGION+'-docker.pkg.dev/'+PROJECT+'/containers/'
     images={'worker':base+'sns-comments:'+tag,'web':base+'sns-comments-web:'+tag}
     build={'steps':[{'name':'gcr.io/cloud-builders/docker','args':['build','-f',f,'-t',images[k],'.']}
         for k,f in [('worker','Dockerfile'),('web','Dockerfile.web')]],'images':list(images.values()),'options':{'logging':'GCS_ONLY'}}
-    (RELEASE/'cloudbuild.json').write_text(json.dumps(build,indent=2))
-    (RELEASE/'release.json').write_text(json.dumps({'images':images,'files':{str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file()}},indent=2))
+    (RELEASE/'cloudbuild.json').write_text(json.dumps(build,indent=2), encoding="utf-8")
+    (RELEASE/'release.json').write_text(json.dumps({'images':images,'files':{str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file()}},indent=2), encoding="utf-8")
     print(json.dumps({'images':images,'collection_basis':'comment_written_at','schedule_preserved':True}))
 
 
@@ -109,23 +109,23 @@ def build():
     info=json.loads(gcloud(['builds','submit',str(RELEASE/'context'),'--config='+str(RELEASE/'cloudbuild.json'),
         '--service-account=projects/'+PROJECT+'/serviceAccounts/sns-build@'+PROJECT+'.iam.gserviceaccount.com',
         '--gcs-log-dir=gs://'+PROJECT+'-build/logs','--gcs-source-staging-dir=gs://'+PROJECT+'-build/source','--async','--format=json']).stdout)
-    (RELEASE/'build.json').write_text(json.dumps(info,indent=2));print(json.dumps({'id':info['id'],'status':info['status']}))
+    (RELEASE/'build.json').write_text(json.dumps(info,indent=2), encoding="utf-8");print(json.dumps({'id':info['id'],'status':info['status']}))
 
 
 def deploy():
-    release=json.loads((RELEASE/'release.json').read_text())
-    build_id=json.loads((RELEASE/'build.json').read_text())['id']
+    release=json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))
+    build_id=json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
     if gcloud(['builds','describe',build_id,'--format=value(status)']).stdout.strip()!='SUCCESS':
         raise SystemExit('검증된 빌드 성공 후 배포해주세요.')
     before=json.loads(gcloud(['run','jobs','describe','sns-comments-daily','--region='+REGION,'--format=json']).stdout)
-    (RELEASE/'job-before.json').write_text(json.dumps(before,indent=2))
+    (RELEASE/'job-before.json').write_text(json.dumps(before,indent=2), encoding="utf-8")
     gcloud(['run','jobs','update','sns-comments-daily','--region='+REGION,'--image='+release['images']['worker']])
     after=json.loads(gcloud(['run','jobs','describe','sns-comments-daily','--region='+REGION,'--format=json']).stdout)
     expected=before['spec']['template']['spec']['template']['spec']
     expected['containers'][0]['image']=release['images']['worker']
     if expected!=after['spec']['template']['spec']['template']['spec']:
         raise SystemExit('이미지 외 설정 변경을 확인해야 합니다.')
-    (RELEASE/'job-after.json').write_text(json.dumps(after,indent=2))
+    (RELEASE/'job-after.json').write_text(json.dumps(after,indent=2), encoding="utf-8")
     print(json.dumps({'deployed':True,'image_only_verified':True,'image':release['images']['worker']}))
 
 

@@ -13,7 +13,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('action',choices=['prepare','build','deploy'])
     args=parser.parse_args()
-    settings=json.loads((release.ROOT/'.local/web-release/operational-config.json').read_text())
+    settings=json.loads((release.ROOT/'.local/web-release/operational-config.json').read_text(encoding="utf-8"))
     assert settings['cloud'].get('post_history') is None
     assert settings['cloud']['comment_history']=='previous_month'
     release.RELEASE=release.ROOT/'.local/comment-frontier-release'

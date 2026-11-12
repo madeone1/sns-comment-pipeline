@@ -20,7 +20,7 @@ from cloud_common import ROOT, PROJECT
 
 DAY='2026-11-10'
 os.umask(0o077)
-settings=json.loads((ROOT/'.local/web-release/operational-config.json').read_text())
+settings=json.loads((ROOT/'.local/web-release/operational-config.json').read_text(encoding="utf-8"))
 shared=CloudState(PROJECT+'-state',UserTransport())
 recovered=[]
 with shared.lease():
@@ -67,4 +67,4 @@ with shared.lease():
         pipeline['notion_recovery']={'accounts':recovered,'verified_at':dt.datetime.now(dt.timezone.utc).isoformat()}
         shared.json_put(f'pipeline/{DAY}/status.json',pipeline,generation)
 folder=ROOT/'.local/notion-autolink-release';folder.mkdir(parents=True,exist_ok=True)
-(folder/'recovery.json').write_text(json.dumps({'recovered':recovered,'no_collection_or_ai':True},ensure_ascii=False,indent=2))
+(folder/'recovery.json').write_text(json.dumps({'recovered':recovered,'no_collection_or_ai':True},ensure_ascii=False,indent=2), encoding="utf-8")

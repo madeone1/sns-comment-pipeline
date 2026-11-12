@@ -82,7 +82,7 @@ def request_status(url, raw=None, signature=None):
 
 
 def check():
-    deployment = json.loads((RELEASE/'deployment.json').read_text())
+    deployment = json.loads((RELEASE/'deployment.json').read_text(encoding="utf-8"))
     callback = deployment['callback_url']
     app_secret, verify_token = secret('sns-meta-app-secret'), secret('sns-webhook-verify-token')
     # Exercise the actual callback. The platform may reserve healthz paths.
@@ -101,30 +101,30 @@ def check():
     assert status == 200, 'signed callback / registry read failed'
     result = {'unsigned_callback_get': 403, 'invalid_signature': 403, 'verification_challenge': 200,
         'signed_empty_delivery': 200, 'natural_comment_verified': False}
-    (RELEASE/'receiver-check.json').write_text(json.dumps(result, indent=2))
+    (RELEASE/'receiver-check.json').write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result))
 
 
 def subscribe():
-    callback = json.loads((RELEASE/'deployment.json').read_text())['callback_url']
+    callback = json.loads((RELEASE/'deployment.json').read_text(encoding="utf-8"))['callback_url']
     app_secret, verify_token, token = secret('sns-meta-app-secret'), secret('sns-webhook-verify-token'), secret('sns-meta-token')
     identity = graph('app', token, {'fields': 'id,name'})
     if identity.get('id') != APP_ID:
         raise PilotError('운영 토큰의 앱이 승인한 앱과 다릅니다.')
     app_token = APP_ID+'|'+app_secret
     before = graph(APP_ID+'/subscriptions', app_token)
-    (RELEASE/'meta-subscriptions-before.json').write_text(json.dumps(before, indent=2))
+    (RELEASE/'meta-subscriptions-before.json').write_text(json.dumps(before, indent=2), encoding="utf-8")
     for item in before.get('data', []):
         if item.get('object') == 'instagram' and item.get('callback_url') not in (None, callback):
             raise PilotError('Instagram에 다른 콜백이 등록되어 있습니다. 기존 연결 보존을 확인해야 합니다.')
     graph(APP_ID+'/subscriptions', app_token, {'object': 'instagram', 'callback_url': callback,
         'fields': 'comments', 'verify_token': verify_token, 'include_values': 'true'}, 'POST')
     subscription = graph(APP_ID+'/subscriptions', app_token)
-    (RELEASE/'meta-subscriptions-after.json').write_text(json.dumps(subscription, indent=2))
+    (RELEASE/'meta-subscriptions-after.json').write_text(json.dumps(subscription, indent=2), encoding="utf-8")
     instagram = next((r for r in subscription.get('data', []) if r.get('object') == 'instagram'), None)
     if not instagram or instagram.get('callback_url') != callback:
         raise PilotError('Meta의 콜백 등록 결과를 확인하지 못했습니다.')
-    settings = json.loads((RELEASE/'context/config.json').read_text())
+    settings = json.loads((RELEASE/'context/config.json').read_text(encoding="utf-8"))
     accounts = []
     for name in settings['cloud']['scheduled_accounts']:
         account = select(settings, name)['account_id']
@@ -134,11 +134,11 @@ def subscribe():
         accounts.append({'username': name, 'account_id': account, 'app_id': APP_ID,
             'subscribed_fields': match.get('subscribed_fields') if match else None, 'app_present': bool(match),
             'app_identity_basis': 'explicit_app_id_field_and_verified_token'})
-        (RELEASE/'account-subscriptions-after.json').write_text(json.dumps(accounts, indent=2))
+        (RELEASE/'account-subscriptions-after.json').write_text(json.dumps(accounts, indent=2), encoding="utf-8")
         if not match or 'comments' not in match.get('subscribed_fields', []):
             raise PilotError('계정의 comments 구독 확인 대기: '+name)
     result = {'meta_callback_registered': True, 'app_id': APP_ID, 'accounts': accounts, 'natural_comment_verified': False}
-    (RELEASE/'meta-connection.json').write_text(json.dumps(result, indent=2))
+    (RELEASE/'meta-connection.json').write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result))
 
 

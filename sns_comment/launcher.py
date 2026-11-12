@@ -24,7 +24,7 @@ def write_launch(record, directory=None):
     target = directory / "last-launch.json"
     temporary = directory / (".launch-" + record["id"] + ".tmp")
     try:
-        temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.chmod(0o600)
         temporary.replace(target)
     finally:

@@ -71,7 +71,7 @@ def write_result(path, result):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(".media-counts-" + uuid.uuid4().hex + ".tmp")
     try:
-        temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.chmod(0o600)
         temporary.replace(path)
     finally:

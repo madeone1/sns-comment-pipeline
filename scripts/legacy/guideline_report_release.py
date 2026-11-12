@@ -17,12 +17,12 @@ RELEASE=ROOT/'.local/guideline-report-release'
 
 
 def save(name,value):
-    (RELEASE/(name+'.json')).write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
+    (RELEASE/(name+'.json')).write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n', encoding="utf-8")
 
 
 def prepare():
     RELEASE.mkdir(parents=True,exist_ok=True)
-    baseline=json.loads((ROOT/'.local/account-tabs-release/context/config.json').read_text())
+    baseline=json.loads((ROOT/'.local/account-tabs-release/context/config.json').read_text(encoding="utf-8"))
     settings=copy.deepcopy(baseline)
     settings['notion']['verify_report_guidelines']=True
     assert settings['notion']['regional_report'] is True
@@ -34,7 +34,7 @@ def prepare():
         ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     for name in ('Dockerfile','.dockerignore','.gcloudignore'):
         shutil.copy2(ROOT/name,folder/name)
-    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n')
+    (folder/'config.json').write_text(json.dumps(settings,ensure_ascii=False,indent=2)+'\n', encoding="utf-8")
     tag=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')+'-guideline-report'
     image=f'{REGION}-docker.pkg.dev/{PROJECT}/containers/sns-comments:{tag}'
     save('release',{'image':image,'config_change':'notion.verify_report_guidelines=true',
@@ -53,8 +53,8 @@ def build():
 
 
 def deploy():
-    image=json.loads((RELEASE/'release.json').read_text())['image']
-    build_id=json.loads((RELEASE/'build.json').read_text())['id']
+    image=json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))['image']
+    build_id=json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
     assert gcloud(['builds','describe',build_id,'--format=value(status)']).stdout.strip()=='SUCCESS'
     before=json.loads(gcloud(['run','jobs','describe','sns-comments-daily','--region='+REGION,'--format=json']).stdout)
     save('job-before',before)

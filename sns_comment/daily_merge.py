@@ -294,13 +294,13 @@ class JsonJournal:
     """An atomic, private local journal; caller holds its single-writer lock."""
     def __init__(self, path):
         self.path = Path(path)
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, name = tempfile.mkstemp(prefix=".merge-", dir=self.path.parent)
         try:
-            with os.fdopen(fd, "w") as stream:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(self.data, stream, ensure_ascii=False)
                 stream.flush(); os.fsync(stream.fileno())
             os.replace(name, self.path)

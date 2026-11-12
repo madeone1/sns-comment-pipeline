@@ -231,7 +231,7 @@ class NotionTokenTests(unittest.TestCase):
                     code = notion_token.main(["--result", str(result_path)])
                 self.assertEqual(code, int(failure))
                 self.assertNotIn(TOKEN, output.getvalue())
-                self.assertNotIn(TOKEN, result_path.read_text())
+                self.assertNotIn(TOKEN, result_path.read_text(encoding="utf-8"))
                 self.assertEqual(result_path.stat().st_mode & 0o777, 0o600)
 
     def test_cloud_ignores_diagnostic_token_and_keeps_existing_account_oauth(self):

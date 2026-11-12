@@ -60,7 +60,7 @@ class Input(BaseHTTPRequestHandler):
             result = gcloud(['secrets', 'versions', 'access', 'latest', '--secret=sns-webhook-verify-token'])
             if not result.returncode:
                 token = result.stdout.strip()
-        deployment = json.loads((RELEASE/'deployment.json').read_text()) if (RELEASE/'deployment.json').exists() else {}
+        deployment = json.loads((RELEASE/'deployment.json').read_text(encoding="utf-8")) if (RELEASE/'deployment.json').exists() else {}
         markup = f'''<!doctype html><html lang="ko"><meta charset="utf-8"><title>웹훅 비밀 등록</title>
         <style>body{{font:16px system-ui;max-width:680px;margin:70px auto;padding:24px;color:#17382c}}input{{box-sizing:border-box;width:100%;padding:14px;margin:12px 0}}button{{padding:12px 20px}}p{{line-height:1.6}}</style>
         <h1>웹훅 연결 준비</h1><p>대상: SNS Comments Analyze ({APP_ID})</p><p>{html.escape(message)}</p>'''
@@ -112,7 +112,7 @@ class Input(BaseHTTPRequestHandler):
                 return
             info = json.loads(result.stdout)
             (RELEASE/'app-secret-registration.json').write_text(json.dumps({'app_id': APP_ID, 'app_name': identity.get('name'),
-                'secret_version': info['name'], 'secret_value_logged': False}, ensure_ascii=False, indent=2))
+                'secret_version': info['name'], 'secret_value_logged': False}, ensure_ascii=False, indent=2), encoding="utf-8")
             self.page(success=True)
         except (ValueError, KeyError, OSError, subprocess.SubprocessError, PilotError) as error:
             if isinstance(error, PilotError):
@@ -127,6 +127,6 @@ if __name__ == '__main__':
     except PilotError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from None
-    (RELEASE/'setup-local.json').write_text(json.dumps({'url': f'http://127.0.0.1:{PORT}/setup/'+GUARD}))
+    (RELEASE/'setup-local.json').write_text(json.dumps({'url': f'http://127.0.0.1:{PORT}/setup/'+GUARD}), encoding="utf-8")
     print(json.dumps({'listening': 'loopback only', 'port': PORT, 'secret_values_logged': False}), flush=True)
     HTTPServer(('127.0.0.1', PORT), Input).serve_forever()
