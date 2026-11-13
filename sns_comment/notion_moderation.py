@@ -1,13 +1,14 @@
 """Daily Notion summary and Notion choices for comments that need a person.
 
-The 09:00 job appends one toggle to today's 일일 업무 page. It does not create
-that page. The 10-minute job, only when SNS_NOTION_DECISIONS=1, copies a Notion
+The 09:00 job adds one toggle in the Develop section of today's 일일 업무 page.
+It does not create that page. One shared decision database is reused. The 10-minute job, only when SNS_NOTION_DECISIONS=1, copies a Notion
 숨김/유지 choice into the rulebook sheet when that cell is still empty, then
 the existing sheet logic hides or confirms 유지. The sheet stays the source of
 truth. Nothing is deleted and nothing is un-hidden.
 """
 
 import datetime as dt
+import json
 import os
 import re
 import time
@@ -36,7 +37,13 @@ SCHEMA = (
 NOTE_DAY = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 NOTE_CLOCK = re.compile(r"(\d{2}:\d{2})")
 DATABASE_TAG = re.compile(r"<database\b([^>]*)>(.*?)</database>", re.S)
+DATA_SOURCE_TAG = re.compile(r"<data-source\b([^>]*)/?>", re.I)
 ATTR = re.compile(r'([\w:-]+)="([^"]*)"')
+COLLECTION_URL = re.compile(r"collection://[0-9a-fA-F-]{32,36}")
+PAGE_URL = re.compile(r"https://(?:www\.)?(?:app\.)?notion\.(?:com|so)/[^\s\"'<>]+")
+DEVELOP_HEADING = re.compile(r"^###\s+(?:<b>)?Develop(?:</b>)?\s*$")
+ROOT_HEADING = re.compile(r"^#{1,3}\s+\S")
+REPORT_MARK = ("📊", "📣", "📈")
 
 
 def notion_decisions_enabled():
@@ -145,7 +152,7 @@ def sheet_memo_status(memo, now):
 
 
 def toggle_markdown(day, hidden, pending_count, database):
-    lines = ["<toggle>", "💬 <b>" + toggle_title(day) + "</b>", "",
+    lines = ['<toggle heading="h3">', "💬 <b>" + toggle_title(day) + "</b>", "",
              "어제 숨긴 댓글 " + str(hidden["total"]) + "건", ""]
     for name in ACCOUNTS:
         lines.append("- " + name + " " + str(hidden["by_account"][name]) + "건")
@@ -164,19 +171,98 @@ def _attrs(text):
     return {key: value for key, value in ATTR.findall(text)}
 
 
+def _collection(value):
+    text = str(value or "").strip()
+    match = COLLECTION_URL.search(text)
+    if match:
+        return match.group(0)
+    raw = text.replace("-", "")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", raw):
+        dashed = raw.lower()
+        return "collection://" + "-".join((dashed[0:8], dashed[8:12], dashed[12:16], dashed[16:20], dashed[20:32]))
+    return ""
+
+
+def _page_url(value):
+    if not isinstance(value, str):
+        return ""
+    match = PAGE_URL.search(value)
+    return match.group(0).rstrip(").,>") if match else ""
+
+
+def _json_candidates(value, found):
+    if isinstance(value, dict):
+        sources = value.get("data_sources") if isinstance(value.get("data_sources"), list) else value.get("dataSources")
+        source = ""
+        if isinstance(sources, list):
+            for item in sources:
+                if isinstance(item, dict):
+                    source = _collection(item.get("url") or item.get("data_source_url") or item.get("id") or "")
+                    if source:
+                        break
+        if not source:
+            source = _collection(value.get("data_source_url") or value.get("collection") or "")
+        url = _page_url(value.get("url") or "")
+        if not url and source and isinstance(value.get("id"), str):
+            raw = value["id"].replace("-", "")
+            if re.fullmatch(r"[0-9a-fA-F]{32}", raw):
+                url = "https://app.notion.com/p/" + raw.lower()
+        title = value.get("title") if isinstance(value.get("title"), str) else value.get("name") if isinstance(value.get("name"), str) else ""
+        if url or source:
+            found.append((title.strip(), {"url": url, "data_source_url": source,
+                                           "database_id": value.get("id") if isinstance(value.get("id"), str) else ""}))
+        for child in value.values():
+            _json_candidates(child, found)
+    elif isinstance(value, list):
+        for item in value:
+            _json_candidates(item, found)
+    elif isinstance(value, str) and value.strip()[:1] in "{[":
+        try:
+            _json_candidates(json.loads(value), found)
+        except ValueError:
+            return
+
+
+def _choose_database(found):
+    complete = [item for item in found if item[1].get("url") and item[1].get("data_source_url")]
+    titled = [item for item in complete if item[0] == DATABASE_TITLE]
+    pool = titled or complete
+    if len(pool) == 1:
+        return pool[0][1]
+    urls = list(dict.fromkeys(item[1]["url"] for item in found if item[1].get("url")))
+    sources = list(dict.fromkeys(item[1]["data_source_url"] for item in found if item[1].get("data_source_url")))
+    titled_urls = list(dict.fromkeys(item[1]["url"] for item in found if item[0] == DATABASE_TITLE and item[1].get("url")))
+    chosen_urls = titled_urls or urls
+    if len(chosen_urls) == 1 and len(sources) <= 1:
+        identity = next((item[1].get("database_id") or "" for item in found if item[1].get("url") == chosen_urls[0]), "")
+        return {"url": chosen_urls[0], "data_source_url": sources[0] if sources else "", "database_id": identity}
+    if len(sources) == 1 and not chosen_urls:
+        return {"url": "", "data_source_url": sources[0], "database_id": ""}
+    raise PilotError("사람 판단 데이터베이스 주소를 확인하지 못했습니다.")
+
+
 def parse_database(result):
-    text = result.get("text") if isinstance(result, dict) else ""
-    matches = []
+    """Read a database address from either a Notion tag or the JSON create response."""
+    found = []
+    text = ""
+    if isinstance(result, dict):
+        _json_candidates(result, found)
+        text = result.get("text") if isinstance(result.get("text"), str) else ""
+    elif isinstance(result, str):
+        text = result
+    if text.strip()[:1] in "{[":
+        _json_candidates(text, found)
     for attrs, title in DATABASE_TAG.findall(text or ""):
         values = _attrs(attrs)
-        if values.get("url") and values.get("data-source-url"):
-            matches.append((title.strip(), {"url": values["url"], "data_source_url": values["data-source-url"]}))
-    titled = [item for item in matches if item[0] == DATABASE_TITLE]
-    if len(titled) == 1:
-        return titled[0][1]
-    if len(matches) == 1:
-        return matches[0][1]
-    raise PilotError("사람 판단 데이터베이스 주소를 확인하지 못했습니다.")
+        found.append((title.strip(), {"url": values.get("url") or "",
+                                       "data_source_url": _collection(values.get("data-source-url") or ""),
+                                       "database_id": ""}))
+    for attrs in DATA_SOURCE_TAG.findall(text or ""):
+        values = _attrs(attrs)
+        source = _collection(values.get("url") or values.get("data-source-url") or "")
+        if source:
+            found.append(("", {"url": "", "data_source_url": source, "database_id": ""}))
+    return _choose_database(found)
 
 
 def _page_text(page):
@@ -186,13 +272,21 @@ def _page_text(page):
 
 
 def find_database_on_page(page):
+    """Find our database even when the page tag has a URL and no data-source attribute."""
+    found = []
     for attrs, title in DATABASE_TAG.findall(_page_text(page)):
         if title.strip() != DATABASE_TITLE:
             continue
         values = _attrs(attrs)
-        if values.get("url") and values.get("data-source-url"):
-            return {"url": values["url"], "data_source_url": values["data-source-url"]}
-    return None
+        found.append((DATABASE_TITLE, {"url": values.get("url") or "",
+                                        "data_source_url": _collection(values.get("data-source-url") or ""),
+                                        "database_id": ""}))
+    if not found:
+        return None
+    try:
+        return _choose_database(found)
+    except PilotError:
+        return found[0][1]
 
 
 def _finish_async(mcp, result, sleeper):
@@ -214,21 +308,74 @@ def _finish_async(mcp, result, sleeper):
     raise PilotError("Notion 비동기 반영이 대기 중입니다. 결과 확인 후 재실행이 필요합니다.")
 
 
-def ensure_database(mcp, state, settings, sleeper=time.sleep):
+def _complete_database(mcp, database):
+    if database.get("url") and database.get("data_source_url"):
+        return database
+    target = database.get("url") or database.get("data_source_url")
+    if not target:
+        raise PilotError("사람 판단 데이터베이스 주소를 확인하지 못했습니다.")
+    parsed = parse_database(mcp.call("fetch", {"id": target}))
+    url = database.get("url") or parsed.get("url")
+    source = database.get("data_source_url") or parsed.get("data_source_url")
+    if not url or not source:
+        raise PilotError("사람 판단 데이터베이스 주소를 확인하지 못했습니다.")
+    return {"url": url, "data_source_url": source,
+            "database_id": database.get("database_id") or parsed.get("database_id") or "",
+            "data_source_id": source.replace("collection://", "")}
+
+
+def _remember_database(state, generation, database):
+    saved = {"url": database["url"], "data_source_url": database["data_source_url"],
+             "database_id": database.get("database_id") or "",
+             "data_source_id": database["data_source_url"].replace("collection://", "")}
+    state.json_put(STATE_NAME, saved, generation=generation)
+    return saved
+
+
+def _saved_database(state):
+    current, generation = state.json_get(STATE_NAME)
+    if isinstance(current, dict) and current.get("url") and current.get("data_source_url"):
+        return current, generation
+    return None, generation
+
+
+def ensure_database(mcp, state, settings, sleeper=time.sleep, pages=()):
+    """Reuse the saved database, or the one already on the page. Never create a second one."""
     from .cloud_state import NOTION_MODERATION_LEASE, lease_retry
+
+    def locate(page_list):
+        for page in page_list:
+            if not page:
+                continue
+            found = find_database_on_page(page if isinstance(page, dict) else mcp.call("fetch", {"id": page}))
+            if found and (found.get("url") or found.get("data_source_url")):
+                titled = DATABASE_TITLE in _page_text(page if isinstance(page, dict) else {"text": ""}) or found.get("url")
+                if titled or found.get("url"):
+                    return _complete_database(mcp, found)
+        return None
+
     def create():
-        current, generation = state.json_get(STATE_NAME)
-        if isinstance(current, dict) and current.get("url") and current.get("data_source_url"):
-            return current
+        saved, generation = _saved_database(state)
+        if saved:
+            return saved
         parent = parent_page_id(settings)
-        found = find_database_on_page(mcp.call("fetch", {"id": parent}))
-        created = found or parse_database(_finish_async(mcp, mcp.call("create-database", {
+        found = locate([parent, *pages])
+        if found:
+            return _remember_database(state, generation, found)
+        response = _finish_async(mcp, mcp.call("create-database", {
             "parent": {"type": "page_id", "page_id": parent},
             "title": DATABASE_TITLE,
             "schema": SCHEMA,
-        }), sleeper))
-        state.json_put(STATE_NAME, created, generation=generation)
-        return created
+        }), sleeper)
+        created = None
+        try:
+            created = _complete_database(mcp, parse_database(response))
+        except PilotError:
+            created = locate([parent, *pages])
+        if not created:
+            raise PilotError("사람 판단 데이터베이스 주소를 확인하지 못했습니다.")
+        return _remember_database(state, generation, created)
+
     if not hasattr(state, "lease"):
         return create()
     with lease_retry(state, 120, NOTION_MODERATION_LEASE, attempts=4, wait_seconds=2, sleeper=sleeper):
@@ -365,14 +512,132 @@ def push_results(sheet, mcp, database, now=None):
     return updated
 
 
-def _append_toggle(mcp, page, day, hidden, pending_count, database, sleeper):
-    if page.get("truncated") and toggle_title(day) not in _page_text(page):
+def _develop_section(content):
+    """Root ### Develop span, ending at the next root heading. Nested toggles stay inside."""
+    depth = 0
+    fence = None
+    offset = 0
+    start = None
+    heading_end = None
+    for line in content.splitlines(keepends=True):
+        end = offset + len(line)
+        marker = re.match(r"\s*(`{3,}|~{3,})", line)
+        if marker and depth == 0:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            offset = end
+            continue
+        if fence is None:
+            if depth == 0 and DEVELOP_HEADING.match(line.strip()):
+                if start is None:
+                    start = offset
+                    heading_end = end
+                else:
+                    return start, offset, heading_end
+            elif depth == 0 and start is not None and ROOT_HEADING.match(line.strip()):
+                return start, offset, heading_end
+            for match in re.finditer(r"<(/?)(?:toggle|callout|quote|columns|column|ul|ol|li|table|tr|td|th|synced-block)\b[^>]*?/?>", line):
+                if match.group(0).endswith("/>"):
+                    continue
+                depth = max(0, depth - 1) if match.group(1) else depth + 1
+        offset = end
+    if start is None:
+        raise PilotError("일일 업무의 Develop 구역을 찾지 못했습니다.")
+    return start, len(content), heading_end
+
+
+def _last_report_toggle(section):
+    depth = 0
+    offset = 0
+    open_at = None
+    title = None
+    found = None
+    for line in section.splitlines(keepends=True):
+        stripped = line.strip()
+        if depth == 0 and stripped.startswith("<toggle"):
+            open_at = offset
+            title = None
+        if open_at is not None and title is None and depth == 1 and stripped and not stripped.startswith("<"):
+            title = stripped
+        for match in re.finditer(r"<(/?)toggle\b[^>]*?/?>", line):
+            if match.group(0).endswith("/>"):
+                continue
+            if match.group(1):
+                depth -= 1
+                if depth == 0 and open_at is not None:
+                    block = section[open_at:offset + match.end()]
+                    label = re.sub(r"</?b>", "", title or "")
+                    if label.startswith(REPORT_MARK) or "보고서" in label:
+                        found = block
+                    open_at = None
+                    title = None
+            else:
+                depth += 1
+        offset += len(line)
+    return found
+
+
+def _own_database_tag(content, url):
+    for match in DATABASE_TAG.finditer(content):
+        if match.group(2).strip() != DATABASE_TITLE:
+            continue
+        if _attrs(match.group(1)).get("url") == url:
+            return match.group(0)
+    return ""
+
+
+def toggle_updates(content, day, hidden, pending_count, database):
+    """Put the h3 toggle in ### Develop and move our own database tag into it."""
+    if toggle_title(day) in content:
+        return []
+    start, end, heading_end = _develop_section(content)
+    section = content[start:end]
+    if content.count(section) != 1:
+        raise PilotError("Develop 구역이 여러 번이라 토글 위치를 정하지 못했습니다.")
+    toggle = toggle_markdown(day, hidden, pending_count, database)
+    report = _last_report_toggle(section)
+    if report:
+        if section.count(report) != 1:
+            raise PilotError("보고서 토글이 겹쳐 위치를 정하지 못했습니다.")
+        new_section = section.replace(report, report + "\n\n" + toggle, 1)
+    else:
+        rel = heading_end - start
+        new_section = section[:rel] + "\n" + toggle + section[rel:]
+    own = _own_database_tag(section, database["url"])
+    if own and own in new_section and own not in toggle:
+        new_section = new_section.replace(own, "", 1)
+    outside = ""
+    if content.count(_own_database_tag(content, database["url"]) or "\0") == 1:
+        tag = _own_database_tag(content, database["url"])
+        if tag and tag not in section:
+            outside = tag
+    if not outside:
+        return [{"old_str": section, "new_str": new_section}]
+    # One replacement keeps the database URL in the document while the old block moves into the toggle.
+    tag_at = content.find(outside)
+    if tag_at > end:
+        old = content[start:tag_at + len(outside)]
+        new = new_section + content[end:tag_at]
+    else:
+        old = content[tag_at:end]
+        new = content[tag_at + len(outside):start] + new_section
+    if content.count(old) != 1:
+        raise PilotError("만든 데이터베이스 블록을 토글 안으로 옮길 위치를 확인하지 못했습니다.")
+    return [{"old_str": old, "new_str": new}]
+
+
+def _place_toggle(mcp, page, day, hidden, pending_count, database, sleeper):
+    text = _page_text(page)
+    if page.get("truncated") and toggle_title(day) not in text:
         raise PilotError("일일 업무 페이지가 잘려 오늘 토글이 있는지 확인하지 못했습니다.")
-    if toggle_title(day) in _page_text(page):
+    updates = toggle_updates(text, day, hidden, pending_count, database)
+    if not updates:
         return "unchanged"
     result = _finish_async(mcp, mcp.call("update-page", {
-        "page_id": page["id"], "command": "insert_content", "position": {"type": "end"},
-        "content": toggle_markdown(day, hidden, pending_count, database), "allow_async": False,
+        "page_id": page["id"], "command": "update_content", "content_updates": updates, "allow_async": False,
     }), sleeper)
     if isinstance(result, dict) and result.get("warnings"):
         raise PilotError("일일 업무 토글 추가에 Notion 경고가 있어 완료를 보류합니다.")
@@ -401,11 +666,14 @@ def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempt
             sleeper(wait_seconds)
     if not isinstance(page, dict) or not page.get("id"):
         raise PilotError("일일 업무 페이지를 확인하지 못했습니다.")
-    database = ensure_database(mcp, state, settings, sleeper=sleeper)
+    database = ensure_database(mcp, state, settings, sleeper=sleeper, pages=(page,))
+    fresh = mcp.call("fetch", {"id": page["id"]})
+    if isinstance(fresh, dict) and isinstance(fresh.get("text"), str):
+        page = {**page, "text": fresh["text"], "truncated": fresh.get("truncated")}
     hidden = hidden_yesterday(_read_rows(sheet, HIDE_TAB), yesterday)
     pending = pending_reviews(_read_rows(sheet, REVIEW_TAB))
     added = add_pending(mcp, database, pending)
-    outcome = _append_toggle(mcp, page, day, hidden, len(pending), database, sleeper)
+    outcome = _place_toggle(mcp, page, day, hidden, len(pending), database, sleeper)
     _log("notion_summary_" + outcome, day=day, hidden=hidden["total"], pending=len(pending))
     return {"status": outcome, "day": day, "page_id": page["id"], "hidden": hidden["total"],
             "pending": len(pending), "added": len(added), "database": database}
