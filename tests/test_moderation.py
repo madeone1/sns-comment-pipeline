@@ -774,11 +774,11 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(sheet.data(HIDE_TAB)[1][0], "12")
         turned_off = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
         turned_off["moderation"]["mode"] = "off"
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as handle:
-            json.dump(turned_off, handle)
-            handle.flush()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(turned_off), encoding="utf-8")
             with mock.patch("sns_comment.moderation_sheet.sort_tabs") as sort:
-                self.assertEqual(main(["--config", handle.name, "--apply"]), 0)
+                self.assertEqual(main(["--config", str(path), "--apply"]), 0)
                 sort.assert_not_called()
 
 
