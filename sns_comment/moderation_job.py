@@ -332,9 +332,10 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--backfill-sheet", action="store_true", help="저장된 판단을 기준표 시트에 이어서 붙입니다.")
     parser.add_argument("--notion-summary", action="store_true", help="오늘 일일 업무에 댓글 관리 토글을 붙입니다.")
+    parser.add_argument("--rewrite-toggle", action="store_true", help="오늘 댓글 관리 토글을 짧은 배치로 다시 씁니다. 기본은 미리보기입니다.")
     parser.add_argument("--sort-sheet", action="store_true", help="기준표 데이터 행을 댓글 작성일 내림차순으로 정렬합니다. 기본은 미리보기입니다.")
     parser.add_argument("--fill-missing-dates", action="store_true", help="C열이 비어 있는 행의 인스타 작성 시각을 읽고, 반영 시 그 시각으로 다시 정렬합니다. 기본은 미리보기입니다.")
-    parser.add_argument("--apply", action="store_true", help="--sort-sheet 또는 --fill-missing-dates 와 함께 쓰면 시트에 반영합니다.")
+    parser.add_argument("--apply", action="store_true", help="--sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
@@ -364,6 +365,32 @@ def main(argv=None):
                 return 1
             result = sort_tabs(sheet, state, apply=args.apply)
             log("sheet_sort", apply=args.apply, tabs=result)
+            return 0
+        if args.rewrite_toggle:
+            from .notion_moderation import _open_locked, rewrite_today_toggle
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            sheet = open_sheet(settings, state)
+            if sheet is None:
+                log("moderation_sheet_unavailable", error="기준표 시트를 열 수 없습니다.")
+                return 1
+            opened = _open_locked(settings, state)
+            if opened is None:
+                log("notion_summary_deferred", reason="노션 잠금을 열지 못했습니다.")
+                return 0
+            mcp, reader = opened
+
+            def finder(day):
+                page = reader.daily_page(day)
+                return {"id": page["id"], "url": page.get("url"), "text": page.get("text") or "",
+                        "truncated": page.get("truncated")}
+
+            try:
+                result = rewrite_today_toggle(settings, state, sheet, mcp, finder, apply=args.apply)
+            except PilotError as error:
+                log("notion_toggle_rewrite_failed", error=str(error))
+                return 1
+            log("notion_toggle_rewrite", status=result["status"], day=result["day"],
+                updates=result.get("updates", 0), markdown=result.get("markdown", ""))
             return 0
         if args.notion_summary:
             from .cloud_state import NOTION_SUMMARY_LEASE, CloudError, lease_retry
