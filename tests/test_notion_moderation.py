@@ -14,7 +14,7 @@ from sns_comment.human_decision import apply_human_decisions, set_decision_if_bl
 from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB, sync_sheet
 from sns_comment.notion_mcp import NoDailyPage
 from sns_comment.notion_moderation import (
-    DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled,
+    DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled, parse_database,
     pending_reviews, prepare_notion_decisions, publish_daily_summary, pull_decisions,
     push_results, sheet_memo_status, toggle_title,
 )
@@ -39,19 +39,49 @@ def review_row(comment_id, decision, memo, text="애매한 댓글"):
             comment_id, "", "H1", "확신 낮음", "낮음", decision, memo]
 
 
+DAILY_PAGE = """### Meeting
+
+회의
+
+### Develop
+
+<toggle heading="h3">
+📊 티켓 판매 인사이트 보고서 (2026-11-13)
+
+판매
+</toggle>
+
+<toggle heading="h3">
+📣 마케팅 성과 보고서 (2026-11-13)
+
+마케팅
+</toggle>
+
+### Info
+
+안내
+"""
+
+
 class FakeNotion:
     def __init__(self):
-        self.pages = {PARENT: "부모 페이지"}
+        self.pages = {PARENT: "부모 페이지", "daily-page": DAILY_PAGE}
         self.rows = []
         self.calls = []
+        self.create_response = None
 
     def call(self, name, args):
         self.calls.append((name, copy.deepcopy(args)))
         if name == "fetch":
+            if args["id"] == DB_URL:
+                return {"id": args["id"], "text": '<data-source url="' + SOURCE + '"/>'}
             return {"id": args["id"], "text": self.pages.get(args["id"], "")}
         if name == "create-database":
-            self.pages[PARENT] += '\n<database url="' + DB_URL + '" data-source-url="' + SOURCE + '">' + DATABASE_TITLE + "</database>"
-            return {"text": self.pages[PARENT]}
+            self.pages[PARENT] = self.pages.get(PARENT, "") + '\n<database url="' + DB_URL + '" inline="false">' + DATABASE_TITLE + "</database>\n"
+            if self.create_response is not None:
+                return self.create_response
+            return {"url": DB_URL, "id": "11aabf27-f671-4bd7-ac4f-c437a7e5ef65",
+                    "data_sources": [{"id": SOURCE.replace("collection://", "")}]}
         if name == "query-data-sources":
             params = args["data"].get("params") or []
             query = args["data"]["query"]
@@ -68,8 +98,14 @@ class FakeNotion:
                 self.rows.append(row)
             return {}
         if name == "update-page":
-            if args["command"] == "insert_content":
-                self.pages[args["page_id"]] = self.pages.get(args["page_id"], "") + "\n" + args["content"]
+            if args["command"] == "update_content":
+                text = self.pages.get(args["page_id"], "")
+                for change in args["content_updates"]:
+                    old, new = change["old_str"], change["new_str"]
+                    if text.count(old) != 1:
+                        raise AssertionError("update is not unique")
+                    text = text.replace(old, new, 1)
+                self.pages[args["page_id"]] = text
                 return {}
             if args["command"] == "update_properties":
                 for row in self.rows:
@@ -125,7 +161,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(day, DAY)
         if not self.ready:
             raise NoDailyPage("아직 없습니다")
-        return {"id": "daily-page", "text": self.notion.pages.get("daily-page", "오늘 업무"), "truncated": False}
+        return {"id": "daily-page", "text": self.notion.pages["daily-page"], "truncated": False}
 
     def publish(self, attempts=1):
         return publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, self.finder, now=NOW,
@@ -136,23 +172,26 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "inserted")
         self.assertEqual(result["hidden"], 1)
         self.assertEqual(result["added"], 1)
-        inserted = [args for name, args in self.notion.calls if name == "update-page" and args["command"] == "insert_content"]
-        self.assertEqual(len(inserted), 1)
-        self.assertEqual(inserted[0]["position"], {"type": "end"})
-        content = inserted[0]["content"]
-        self.assertIn(toggle_title(DAY), content)
-        self.assertIn("<b>인스타 댓글 관리 (2026-11-13)</b>", content)
-        self.assertIn("어제 숨긴 댓글 1건", content)
-        self.assertIn("사람 판단 필요 1건", content)
-        self.assertIn("- 서울 1건", content)
-        self.assertIn("- 토론토 0건", content)
-        self.assertIn(HIDE_URL, content)
-        self.assertIn(REVIEW_URL, content)
-        self.assertIn('inline="true">' + DATABASE_TITLE, content)
-        self.assertNotIn("replace_content", content)
+        edited = [args for name, args in self.notion.calls if name == "update-page" and args["command"] == "update_content"]
+        self.assertEqual(len(edited), 1)
+        self.assertNotIn("insert_content", [args["command"] for name, args in self.notion.calls if name == "update-page"])
+        text = self.notion.pages["daily-page"]
+        self.assertLess(text.index("📣 마케팅 성과 보고서"), text.index(toggle_title(DAY)))
+        self.assertLess(text.index(toggle_title(DAY)), text.index("### Info"))
+        self.assertIn("### Meeting", text)
+        self.assertIn('heading="h3"', text)
+        self.assertIn("<b>인스타 댓글 관리 (2026-11-13)</b>", text)
+        self.assertIn("어제 숨긴 댓글 1건", text)
+        self.assertIn("사람 판단 필요 1건", text)
+        self.assertIn("- 서울 1건", text)
+        self.assertIn("- 토론토 0건", text)
+        self.assertIn(HIDE_URL, text)
+        self.assertIn(REVIEW_URL, text)
+        self.assertIn('inline="true">' + DATABASE_TITLE, text)
+        self.assertNotIn("replace_content", [args["command"] for name, args in self.notion.calls if name == "update-page"])
         again = self.publish()
         self.assertEqual(again["status"], "unchanged")
-        self.assertEqual(sum(1 for name, args in self.notion.calls if name == "update-page" and args["command"] == "insert_content"), 1)
+        self.assertEqual(sum(1 for name, args in self.notion.calls if name == "update-page" and args["command"] == "update_content"), 1)
         self.assertEqual(sum(1 for name, _args in self.notion.calls if name == "create-database"), 1)
         self.assertEqual(len(self.notion.rows), 1)
         self.assertEqual(self.notion.rows[0]["댓글 ID"], "82")
@@ -179,6 +218,49 @@ class SummaryTests(unittest.TestCase):
                                        attempts=3, wait_seconds=300, sleeper=self.waits.append)
         self.assertEqual(result["status"], "inserted")
         self.assertEqual(self.waits, [300, 300])
+
+    def test_json_create_response_without_a_database_tag_parses(self):
+        parsed = parse_database({
+            "url": "https://app.notion.com/p/11aabf27f6714bd7ac4fc437a7e5ef65",
+            "id": "11aabf27-f671-4bd7-ac4f-c437a7e5ef65",
+            "data_sources": [{"id": "01e6d1b9-96b7-4234-9965-ab1229bbf794"}],
+        })
+        self.assertEqual(parsed["url"], "https://app.notion.com/p/11aabf27f6714bd7ac4fc437a7e5ef65")
+        self.assertEqual(parsed["data_source_url"], "collection://01e6d1b9-96b7-4234-9965-ab1229bbf794")
+        with self.assertRaises(PilotError):
+            parse_database({"text": "created"})
+
+    def test_existing_database_is_reused_and_moved_into_the_develop_toggle(self):
+        page = DAILY_PAGE + '\n<database url="' + DB_URL + '" inline="false">' + DATABASE_TITLE + "</database>\n"
+        self.notion.pages[PARENT] = page
+
+        def finder(_day):
+            return {"id": PARENT, "text": self.notion.pages[PARENT], "truncated": False}
+
+        result = publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, finder, now=NOW,
+                                       attempts=1, wait_seconds=0, sleeper=self.waits.append)
+        self.assertEqual(result["status"], "inserted")
+        self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
+        text = self.notion.pages[PARENT]
+        self.assertLess(text.index("📣 마케팅 성과 보고서"), text.index(toggle_title(DAY)))
+        self.assertLess(text.index(toggle_title(DAY)), text.index("### Info"))
+        self.assertEqual(text.count("<database"), 1)
+        self.assertIn('inline="true"', text)
+        self.assertNotIn('inline="false"', text)
+        self.assertIn("### Meeting", text)
+        saved, _generation = self.state.json_get("moderation/notion-decision-database.json")
+        self.assertEqual(saved["data_source_url"], SOURCE)
+        again = publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, finder, now=NOW,
+                                      attempts=1, wait_seconds=0, sleeper=self.waits.append)
+        self.assertEqual(again["status"], "unchanged")
+        self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
+
+    def test_unparsed_create_response_reuses_the_database_instead_of_creating_another(self):
+        self.notion.create_response = {"text": "created"}
+        result = self.publish()
+        self.assertEqual(result["status"], "inserted")
+        self.assertEqual(sum(1 for name, _args in self.notion.calls if name == "create-database"), 1)
+        self.assertEqual(self.state.json_get("moderation/notion-decision-database.json")[0]["url"], DB_URL)
 
 
 class DecisionSyncTests(unittest.TestCase):
