@@ -517,6 +517,48 @@ def _put(state, name, value, generation):
         return state.json_put(name, value, generation)
 
 
+def comments_waiting_to_hide(state, account_id, sha):
+    """Stored high-confidence 숨김 rows the 10-minute job can still hide.
+
+    The poll window is short, so a would_hide saved earlier is included on the next
+    run. A human 유지, a low-confidence row, and a third failure stay out.
+    """
+    prefix = "moderation/decisions/" + account_id + "/"
+    if hasattr(state, "list_all"):
+        objects = state.list_all(prefix)
+    else:
+        objects, _more = state.list_objects(prefix, 500)
+    waiting = []
+    for obj in objects:
+        name = obj.get("name") if isinstance(obj, dict) else None
+        if not isinstance(name, str):
+            continue
+        record, _generation = state.json_get(name)
+        if not isinstance(record, dict) or record.get("status") not in {"would_hide", "hide_failed"}:
+            continue
+        if (record.get("label") != HIDE_LABEL or record.get("confidence") != "high"
+                or record.get("policy_sha") != sha or _human_kept(record)):
+            continue
+        if int(record.get("hide_attempts") or 0) >= 3:
+            continue
+        comment_id = record.get("comment_id")
+        text = record.get("text")
+        if not isinstance(comment_id, str) or not comment_id.isdigit() or not isinstance(text, str) or not text:
+            continue
+        waiting.append({
+            "id": comment_id, "account_id": account_id, "text": text,
+            "written_at": record.get("written_at") if isinstance(record.get("written_at"), str) else "",
+            "username": record.get("author_username") if isinstance(record.get("author_username"), str) else None,
+            "author_id": record.get("author_id") if isinstance(record.get("author_id"), str) else None,
+            "media_id": record.get("media_id") if isinstance(record.get("media_id"), str) else None,
+            "permalink": record.get("permalink") if isinstance(record.get("permalink"), str) else None,
+            "parent_id": record.get("parent_id") if isinstance(record.get("parent_id"), str) else None,
+            "is_owner": 0,
+        })
+    waiting.sort(key=lambda comment: (comment.get("written_at") or "", comment["id"]), reverse=True)
+    return waiting[:40]
+
+
 def _pending_hide(existing, comment, sha, settings):
     """Reuse a stored 숨김 decision. Do not call the model again."""
     if not _same(existing, comment, sha):

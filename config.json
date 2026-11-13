@@ -106,7 +106,7 @@
   },
   "moderation": {
     "policy_version": "v2.3",
-    "mode": "dry_run",
+    "mode": "auto_hide",
     "hide_enabled": false,
     "run_with_daily": true,
     "interval_minutes": 10,

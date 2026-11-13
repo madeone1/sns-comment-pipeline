@@ -205,6 +205,15 @@ def _read_rows(client, title):
     return values
 
 
+def _one_cell(sheet_id, row_index, column, text):
+    """Replace one data cell. Neighboring columns, validation, and the row number stay put."""
+    if row_index < FIRST_DATA_ROW:
+        raise PilotError("기준표의 안내·머리글 행은 바꾸지 않습니다.")
+    return {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": row_index, "endRowIndex": row_index + 1,
+            "startColumnIndex": column, "endColumnIndex": column + 1},
+            "rows": [{"values": [cell(text)]}], "fields": "userEnteredValue"}}
+
+
 def _row_request(sheet_id, row_index, values):
     if row_index < FIRST_DATA_ROW:
         raise PilotError("기준표의 안내·머리글 행은 바꾸지 않습니다.")
@@ -308,23 +317,37 @@ def _sync_tab(client, metadata, title, group):
     header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
     if header[:len(columns)] != columns:
         raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
-    present = set()
-    for row in rows[FIRST_DATA_ROW:]:
+    located = {}
+    for index, row in enumerate(rows):
+        if index < FIRST_DATA_ROW:
+            continue
         comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
-        if comment_id:
-            present.add(comment_id)
+        if comment_id and comment_id not in located:
+            located[comment_id] = index
     fresh = []
     reflected = []
+    status_requests = []
     for record in _newest_first(group):
         comment_id = str(record.get("comment_id") or "")
-        if not comment_id or comment_id in present:
-            reflected.append(record)
+        if not comment_id or comment_id in located:
+            index = located.get(comment_id)
+            if isinstance(index, int) and title == HIDE_TAB:
+                row = rows[index]
+                current = _text(row[11]) if len(row) > 11 else ""
+                wanted = display_status(record) or ""
+                if wanted and current != wanted and current != "숨김 완료":
+                    status_requests.append(_one_cell(sheet_id, index, 11, wanted))
+                    status_requests.append(_one_cell(sheet_id, index, 12, _note(record, True)))
+            if comment_id:
+                reflected.append(record)
             continue
         if not _clock(record.get("written_at")):
             continue
-        present.add(comment_id)
+        located[comment_id] = None
         fresh.append(record)
     if not fresh:
+        if status_requests:
+            client.request(":batchUpdate", body={"requests": status_requests})
         return reflected
     highest = _max_number(rows)
     numbered = []
@@ -341,7 +364,7 @@ def _sync_tab(client, metadata, title, group):
         reflected.append(record)
     if title == REVIEW_TAB:
         requests.append(_decision_validation(max(row_count, len(shadow))))
-    client.request(":batchUpdate", body={"requests": requests})
+    client.request(":batchUpdate", body={"requests": status_requests + requests})
     return reflected
 
 
