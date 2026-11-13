@@ -1,11 +1,12 @@
 """Insert moderation rows in comment-time order. Never rewrite existing rows.
 
 Row 1 is a note and row 2 is the header. Data rows stay newest-first by column C,
-댓글 작성일(KST). A new row is inserted where that time belongs, not always on row 3.
-A row with an empty column C is placed after every dated row: a missing Instagram
-time must not jump above a comment that has one. The same written time keeps the
-existing row above the new one. 번호 keeps increasing and is not the sort key.
-Comment IDs already in column G are left untouched.
+댓글 작성일(KST). A new row is inserted where that Instagram time belongs, and only
+when the time is known. A missing time is not invented from the moment we noticed
+the comment. Rows already on the sheet with an empty column C stay after every
+dated row until --fill-missing-dates writes the real time. The same written time
+keeps the existing row above the new one. 번호 keeps increasing and is not the
+sort key. Comment IDs already in column G are left untouched.
 """
 
 import contextlib
@@ -319,6 +320,8 @@ def _sync_tab(client, metadata, title, group):
         if not comment_id or comment_id in present:
             reflected.append(record)
             continue
+        if not _clock(record.get("written_at")):
+            continue
         present.add(comment_id)
         fresh.append(record)
     if not fresh:
@@ -403,6 +406,121 @@ def sort_tabs(client, state, apply=False):
             results.append({"tab": title, "rows": plan["rows"], "moves": len(plan["moves"]),
                             "applied": bool(apply and requests), "preview": plan["moves"][:20]})
     return results
+
+
+def _date_request(sheet_id, row_index, text):
+    """Write column C only. The rest of the row, including validation, stays put."""
+    if row_index < FIRST_DATA_ROW:
+        raise PilotError("기준표의 안내·머리글 행은 바꾸지 않습니다.")
+    return {"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": row_index,
+            "endRowIndex": row_index + 1, "startColumnIndex": 2, "endColumnIndex": 3},
+            "rows": [{"values": [cell(text)]}], "fields": "userEnteredValue"}}
+
+
+def missing_dates(rows):
+    """Data rows whose 댓글 작성일 cell is empty and whose 댓글 ID is present."""
+    found = []
+    for index, row in enumerate(rows):
+        if index < FIRST_DATA_ROW or _time_key(_written_text(row)):
+            continue
+        comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+        if not comment_id:
+            continue
+        found.append({"row": index, "number": _text(row[0]) if row else "",
+                      "account": _text(row[1]) if len(row) > 1 else "",
+                      "author": _text(row[3]) if len(row) > 3 else "",
+                      "comment_id": comment_id})
+    return found
+
+
+def _preview_moves(rows):
+    places = {}
+    for new_index, (old_index, row) in enumerate(sort_plan(rows)["ordered"]):
+        comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+        if comment_id:
+            places[comment_id] = FIRST_DATA_ROW + new_index + 1
+    return places
+
+
+def fill_missing_dates(client, state, lookup, apply=False):
+    """Read Instagram timestamps for blank column C. Write and re-sort only when apply is true.
+
+    lookup(account_label, comment_id) returns an ISO timestamp or raises PilotError.
+    The read is allowed during a dry-run. Sheet cells change only when apply is true.
+    """
+    blanks = []
+    snapshots = {}
+    for title in (HIDE_TAB, REVIEW_TAB):
+        with sheet_section(state, title):
+            rows = [list(row) for row in _read_rows(client, title)]
+            snapshots[title] = rows
+            for item in missing_dates(rows):
+                blanks.append({**item, "tab": title})
+    resolved = []
+    stopped = False
+    for item in blanks:
+        if stopped:
+            resolved.append({**item, "written": "", "error": "API 호출 제한"})
+            continue
+        try:
+            written = lookup(item["account"], item["comment_id"])
+        except PilotError as error:
+            resolved.append({**item, "written": "", "error": str(error)})
+            if "호출 제한" in str(error):
+                stopped = True
+            continue
+        clock = _clock(written)
+        if not clock:
+            resolved.append({**item, "written": "", "error": "댓글 작성 시각을 읽지 못했습니다."})
+            continue
+        resolved.append({**item, "written": clock, "error": ""})
+    for title, rows in snapshots.items():
+        shadow = [list(row) for row in rows]
+        clocks = {item["comment_id"]: item["written"] for item in resolved if item["tab"] == title and item["written"]}
+        for row in shadow[FIRST_DATA_ROW:]:
+            comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+            if comment_id in clocks and not _time_key(_written_text(row)):
+                while len(row) < 3:
+                    row.append("")
+                row[2] = clocks[comment_id]
+        places = _preview_moves(shadow)
+        for item in resolved:
+            if item["tab"] == title and item["comment_id"] in places:
+                item["sheet_row"] = places[item["comment_id"]]
+    if not apply:
+        return {"applied": False, "rows": resolved}
+    for title in (HIDE_TAB, REVIEW_TAB):
+        wanted = {item["comment_id"]: item["written"] for item in resolved if item["tab"] == title and item["written"]}
+        if not wanted:
+            continue
+        with sheet_section(state, title):
+            metadata = _metadata(client)
+            sheet_id, _row_count = _resolve(metadata, title)
+            rows = [list(row) for row in _read_rows(client, title)]
+            header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
+            if header[:len(_columns(title))] != _columns(title):
+                raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
+            requests = []
+            for index, row in enumerate(rows):
+                if index < FIRST_DATA_ROW:
+                    continue
+                comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+                clock = wanted.get(comment_id)
+                if not clock or _time_key(_written_text(row)):
+                    continue
+                while len(row) < 3:
+                    row.append("")
+                row[2] = clock
+                requests.append(_date_request(sheet_id, index, clock))
+            if not requests:
+                continue
+            requests.extend(sort_requests(sheet_id, rows))
+            client.request(":batchUpdate", body={"requests": requests})
+            places = _preview_moves(rows)
+            for item in resolved:
+                if item["tab"] == title and item["comment_id"] in places:
+                    item["sheet_row"] = places[item["comment_id"]]
+    return {"applied": True, "rows": resolved}
 
 
 def sync_sheet(client, records, state=None):

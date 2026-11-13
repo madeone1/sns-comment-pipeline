@@ -617,7 +617,38 @@ class SheetLogTests(unittest.TestCase):
             "updated_at": "2026-11-12T07:00:00+00:00"}, 0)
         backfill_sheet(state, sheet)
         old = [row for row in sheet.data(HIDE_TAB) if len(row) > 6 and row[6] == "17936497245410609"]
-        self.assertEqual(old[0][2], "")
+        self.assertEqual(old, [])
+
+    def test_a_missing_timestamp_is_read_before_the_row_is_inserted(self):
+        state, sheet = MemoryState(), FakeSheets()
+        comment = audience("저급한", "18111760985229472", written="", username="chwj3516")
+
+        class Timed(Hides):
+            def get(self, path, **params):
+                self.seen = (path, params)
+                return {"id": path, "timestamp": "2026-11-11T21:41:00+0000"}
+
+        client = Timed()
+        model = Model({"18111760985229472": {**answer("숨김", "D4", reason="의상"), "id": "18111760985229472"}})
+        moderate([comment], state, DRY, model, client=client, account_username="waterbomb_official",
+                 region="서울", sheet_client=sheet)
+        self.assertEqual(client.seen, ("18111760985229472", {"fields": "timestamp"}))
+        stored = state.data[decision_name(ACCOUNT, "18111760985229472")]
+        self.assertTrue(stored["written_at"].startswith("2026-11-11T21:41:00"))
+        row = [item for item in sheet.data(HIDE_TAB) if item[6] == "18111760985229472"][0]
+        self.assertEqual(row[2], "2026-11-12 06:41")
+        self.assertNotIn("17:05", row[2])
+        again = FakeSheets()
+        bare = audience("저급한", "18111760985229473", written="", username="chwj3516")
+        moderate([bare], state, DRY, Model({"18111760985229473": {**answer("숨김", "D4"), "id": "18111760985229473"}}),
+                 client=Hides(), account_username="waterbomb_official", region="서울", sheet_client=again)
+        self.assertFalse(any(len(row) > 6 and row[6] == "18111760985229473" for row in again.data(HIDE_TAB)))
+        bare["written_at"] = "2026-11-11T21:41:00+0000"
+        moderate([bare], state, DRY, Model({}), client=Hides(), account_username="waterbomb_official",
+                 region="서울", sheet_client=again)
+        filled = [row for row in again.data(HIDE_TAB) if len(row) > 6 and row[6] == "18111760985229473"]
+        self.assertEqual(len(filled), 1)
+        self.assertEqual(filled[0][2], "2026-11-12 06:41")
 
     def test_new_comments_are_inserted_under_the_header_newest_first(self):
         state, sheet = MemoryState(), FakeSheets()
@@ -641,7 +672,7 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(inserted[0]["insertDimension"]["range"]["startIndex"], 2)
         self.assertIs(inserted[0]["insertDimension"]["inheritFromBefore"], False)
 
-    def test_an_older_comment_is_inserted_below_newer_rows_and_a_blank_time_goes_last(self):
+    def test_an_older_comment_is_inserted_below_newer_rows_and_a_blank_time_is_not_inserted(self):
         from sns_comment.moderation_sheet import sync_sheet
         sheet = FakeSheets()
         older = {"status": "hidden", "comment_id": "30070", "region": "서울", "author_username": "a",
@@ -651,10 +682,10 @@ class SheetLogTests(unittest.TestCase):
         blank = {**older, "comment_id": "30071", "written_at": "", "text": "시각 없음"}
         sync_sheet(sheet, [older, blank])
         data = sheet.data(HIDE_TAB)
-        self.assertEqual([row[6] for row in data], ["99999", "30070", "30071"])
+        self.assertEqual([row[6] for row in data], ["99999", "30070"])
         self.assertEqual(data[0][0], "12")
-        self.assertEqual([row[0] for row in data[1:]], ["14", "13"])
-        self.assertEqual(data[2][2], "")
+        self.assertEqual(data[1][0], "13")
+        self.assertTrue(data[1][2].startswith("2026-10-01"))
         inserted = [request["insertDimension"] for body in sheet.updates for request in body["requests"]
                     if "insertDimension" in request]
         self.assertGreater(inserted[0]["range"]["startIndex"], 2)
@@ -780,6 +811,97 @@ class SheetLogTests(unittest.TestCase):
             with mock.patch("sns_comment.moderation_sheet.sort_tabs") as sort:
                 self.assertEqual(main(["--config", str(path), "--apply"]), 0)
                 sort.assert_not_called()
+
+
+    def test_fill_missing_dates_writes_column_c_then_sorts_under_the_tab_lock(self):
+        from sns_comment.cloud_state import SHEET_HIDE_LEASE, SHEET_REVIEW_LEASE
+        from sns_comment.human_decision import find_comment_row
+        from sns_comment.moderation_sheet import fill_missing_dates
+        sheet = FakeSheets()
+        sheet.tabs[HIDE_TAB]["rows"] = [
+            ["안내문"], list(HIDE_COLUMNS),
+            ["12", "서울 댓글", "2026-11-01 09:00", "old", "기존", "https://www.instagram.com/p/old/",
+             "111", "", "K1", "기존", "높음", "숨김 완료", "숨김 메모"],
+            ["133", "서울 댓글", "", "chwj3516", "저급한", "https://www.instagram.com/reel/DbNsNMIy92C/",
+             "18111760985229472", "", "D4", "의상", "높음", "숨겼을 것(시험)", "2026-11-12 17:05 KST 자동 감지(10분 작업)"],
+        ]
+        sheet.tabs[REVIEW_TAB]["rows"] = [
+            ["안내문"], list(REVIEW_COLUMNS),
+            ["40", "서울 댓글", "2026-11-13 09:00", "new", "최근", "https://www.instagram.com/p/new/",
+             "222", "", "H1", "최근", "보통", "숨김", "최근 메모"],
+            ["38", "서울 댓글", "", "jamjoon0408", "나띠", "https://www.instagram.com/reel/DdOiTeZvelx/",
+             "17936497245410609", "", "H1", "애매", "낮음", "", "2026-11-12 17:05 KST 자동 감지"],
+        ]
+        calls = []
+
+        def lookup(account, comment_id):
+            calls.append((account, comment_id))
+            if comment_id == "18111760985229472":
+                return "2026-11-13T01:42:00+00:00"
+            if comment_id == "17936497245410609":
+                return "2026-11-11T21:41:00+0000"
+            raise PilotError("댓글 작성 시각을 읽지 못했습니다.")
+
+        state = _NameLock()
+        preview = fill_missing_dates(sheet, state, lookup, apply=False)
+        self.assertFalse(preview["applied"])
+        self.assertEqual(sheet.updates, [])
+        self.assertEqual(calls, [("서울 댓글", "18111760985229472"), ("서울 댓글", "17936497245410609")])
+        self.assertEqual(state.names, [SHEET_HIDE_LEASE, SHEET_REVIEW_LEASE])
+        self.assertEqual(preview["rows"][0]["written"], "2026-11-13 10:42")
+        self.assertEqual(preview["rows"][0]["sheet_row"], 3)
+        applied = fill_missing_dates(sheet, state, lookup, apply=True)
+        self.assertTrue(applied["applied"])
+        hide = sheet.data(HIDE_TAB)
+        self.assertEqual([row[6] for row in hide], ["18111760985229472", "111"])
+        self.assertEqual(hide[0][0], "133")
+        self.assertEqual(hide[0][2], "2026-11-13 10:42")
+        self.assertEqual(hide[0][11], "숨겼을 것(시험)")
+        self.assertIn("자동 감지", hide[0][12])
+        self.assertEqual(hide[1][12], "숨김 메모")
+        review = sheet.data(REVIEW_TAB)
+        self.assertEqual([row[6] for row in review], ["222", "17936497245410609"])
+        self.assertEqual(review[1][0], "38")
+        self.assertEqual(review[1][2], "2026-11-12 06:41")
+        self.assertEqual(review[0][11], "숨김")
+        self.assertEqual(review[1][12], "2026-11-12 17:05 KST 자동 감지")
+        self.assertEqual(find_comment_row(sheet.tabs[REVIEW_TAB]["rows"], "17936497245410609"), 3)
+        date_writes = [request["updateCells"] for body in sheet.updates for request in body["requests"] if "updateCells" in request]
+        self.assertTrue(date_writes)
+        self.assertTrue(all(request["range"]["startColumnIndex"] == 2 and request["range"]["endColumnIndex"] == 3
+                            and request["range"]["startRowIndex"] >= 2 for request in date_writes))
+        self.assertNotIn("state/lease.json", state.names)
+
+    def test_fill_command_previews_until_apply_and_then_fills_notion(self):
+        from sns_comment.moderation_job import main
+        sheet = FakeSheets()
+        sheet.tabs[HIDE_TAB]["rows"].append(
+            ["133", "서울 댓글", "", "chwj3516", "저급한", "https://www.instagram.com/reel/DbNsNMIy92C/",
+             "18111760985229472", "", "D4", "의상", "높음", "숨겼을 것(시험)", "자동 감지"])
+
+        class Timed:
+            def __init__(self):
+                self.params = None
+
+            def get(self, path, **params):
+                self.params = params
+                return {"id": path, "timestamp": "2026-11-13T01:42:00+0000"}
+
+        client = Timed()
+        with mock.patch.dict(os.environ, {"SNS_STATE_BUCKET": "bucket", "SNS_NOTION_DECISIONS": "1"}), \
+             mock.patch("sns_comment.moderation_job.CloudState", return_value=_NameLock()), \
+             mock.patch("sns_comment.moderation_job.open_sheet", return_value=sheet), \
+             mock.patch("sns_comment.moderation_job.account_clients", return_value={"서울 댓글": client}), \
+             mock.patch("sns_comment.moderation_job.fill_notion_written_dates", return_value=["18111760985229472"]) as notion:
+            self.assertEqual(main(["--fill-missing-dates"]), 0)
+            self.assertEqual(sheet.updates, [])
+            notion.assert_not_called()
+            self.assertEqual(main(["--fill-missing-dates", "--apply"]), 0)
+            notion.assert_called_once()
+        self.assertEqual(client.params, {"fields": "timestamp"})
+        self.assertEqual(sheet.data(HIDE_TAB)[0][6], "18111760985229472")
+        self.assertEqual(sheet.data(HIDE_TAB)[0][2], "2026-11-13 10:42")
+        self.assertEqual(sheet.data(HIDE_TAB)[1][0], "12")
 
 
 class _NameLock:
