@@ -1,8 +1,11 @@
-"""Insert moderation rows under the rulebook header. Never edit existing rows.
+"""Insert moderation rows in comment-time order. Never rewrite existing rows.
 
-Row 1 is a note, row 2 is the header, and the newest comment is inserted at row 3.
-Older rows keep their order and their 번호. Comment IDs already in column G are
-left untouched. A sheet error must not stop classification.
+Row 1 is a note and row 2 is the header. Data rows stay newest-first by column C,
+댓글 작성일(KST). A new row is inserted where that time belongs, not always on row 3.
+A row with an empty column C is placed after every dated row: a missing Instagram
+time must not jump above a comment that has one. The same written time keeps the
+existing row above the new one. 번호 keeps increasing and is not the sort key.
+Comment IDs already in column G are left untouched.
 """
 
 import contextlib
@@ -209,17 +212,52 @@ def _row_request(sheet_id, row_index, values):
             "rows": [{"values": [cell(value) for value in values]}], "fields": "userEnteredValue"}}
 
 
-def _insert_under_header(sheet_id, count):
-    """Insert at the first data row (0-based index 2), directly under the header.
-
-    inheritFromBefore is false so the new rows copy the data row below them,
-    not the header. The note and header stay where they are.
-    """
-    if count < 1:
-        raise PilotError("삽입할 행이 없습니다.")
+def _insert_at(sheet_id, index, count=1):
+    """Insert data rows. The top slot copies the data row below, not the header."""
+    if count < 1 or index < FIRST_DATA_ROW:
+        raise PilotError("데이터 행만 삽입할 수 있습니다.")
     return {"insertDimension": {"range": {"sheetId": sheet_id, "dimension": "ROWS",
-            "startIndex": FIRST_DATA_ROW, "endIndex": FIRST_DATA_ROW + count},
-            "inheritFromBefore": False}}
+            "startIndex": index, "endIndex": index + count},
+            "inheritFromBefore": index > FIRST_DATA_ROW}}
+
+
+def _written_text(row):
+    return _text(row[2]) if len(row) > 2 else ""
+
+
+def _time_key(value):
+    """YYYY-MM-DD HH:MM, or a Sheets date serial shown in that same form.
+
+    Text order matches time order for the zero-padded form the sheet uses.
+    An empty cell has no key and sorts after every dated row.
+    """
+    text = _text(value).strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if not 20000 < number < 100000:
+        return text
+    moment = dt.datetime(1899, 12, 30) + dt.timedelta(days=number)
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _insertion_index(rows, written_text):
+    """Where a comment time belongs. Empty times go after every dated row."""
+    target = _time_key(written_text)
+    for index, row in enumerate(rows):
+        if index < FIRST_DATA_ROW:
+            continue
+        current = _time_key(_written_text(row))
+        if not target:
+            if not current:
+                return index
+            continue
+        if not current or current < target:
+            return index
+    return max(len(rows), FIRST_DATA_ROW)
 
 
 def _decision_validation(end_row):
@@ -286,19 +324,89 @@ def _sync_tab(client, metadata, title, group):
     if not fresh:
         return reflected
     highest = _max_number(rows)
-    requests = [_insert_under_header(sheet_id, len(fresh))]
+    numbered = []
     for offset, record in enumerate(fresh):
-        number = highest + len(fresh) - offset
-        requests.append(_row_request(sheet_id, FIRST_DATA_ROW + offset, row_values(record, number)))
+        numbered.append((record, highest + len(fresh) - offset))
+    shadow = [list(row) for row in rows]
+    requests = []
+    for record, number in reversed(numbered):
+        values = row_values(record, number)
+        index = _insertion_index(shadow, values[2])
+        requests.append(_insert_at(sheet_id, index))
+        requests.append(_row_request(sheet_id, index, values))
+        shadow.insert(index, values)
         reflected.append(record)
     if title == REVIEW_TAB:
-        requests.append(_decision_validation(max(row_count, len(rows)) + len(fresh)))
+        requests.append(_decision_validation(max(row_count, len(shadow))))
     client.request(":batchUpdate", body={"requests": requests})
     return reflected
 
 
+def _dated_then_blank(rows):
+    """Newest comment time first. Empty column C stays after dated rows, in its old order."""
+    data = list(enumerate(rows[FIRST_DATA_ROW:]))
+    dated = [item for item in data if _time_key(_written_text(item[1]))]
+    blank = [item for item in data if not _time_key(_written_text(item[1]))]
+    dated.sort(key=lambda item: _time_key(_written_text(item[1])), reverse=True)
+    return dated + blank
+
+
+def sort_plan(rows):
+    ordered = _dated_then_blank(rows)
+    current = rows[FIRST_DATA_ROW:]
+    moves = []
+    for new_index, (old_index, row) in enumerate(ordered):
+        if old_index != new_index:
+            moves.append({"from": FIRST_DATA_ROW + old_index + 1, "to": FIRST_DATA_ROW + new_index + 1,
+                          "number": _text(row[0]) if row else "", "written": _written_text(row),
+                          "comment_id": _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""})
+    return {"rows": len(current), "moves": moves, "ordered": ordered}
+
+
+def sort_requests(sheet_id, rows):
+    """Copy each data row into time order, then delete the old block. Header stays put."""
+    ordered = _dated_then_blank(rows)
+    current = rows[FIRST_DATA_ROW:]
+    if [index for index, _row in ordered] == list(range(len(current))):
+        return []
+    count = len(current)
+    width = max([len(row) for row in rows] + [13])
+    requests = [_insert_at(sheet_id, FIRST_DATA_ROW, count)]
+    for new_index, (old_index, _row) in enumerate(ordered):
+        source = FIRST_DATA_ROW + count + old_index
+        dest = FIRST_DATA_ROW + new_index
+        span = {"sheetId": sheet_id, "startRowIndex": source, "endRowIndex": source + 1,
+                "startColumnIndex": 0, "endColumnIndex": width}
+        requests.append({"copyPaste": {"source": span,
+            "destination": {**span, "startRowIndex": dest, "endRowIndex": dest + 1},
+            "pasteType": "PASTE_NORMAL", "pasteOrientation": "NORMAL"}})
+    requests.append({"deleteDimension": {"range": {"sheetId": sheet_id, "dimension": "ROWS",
+        "startIndex": FIRST_DATA_ROW + count, "endIndex": FIRST_DATA_ROW + count + count}}})
+    return requests
+
+
+def sort_tabs(client, state, apply=False):
+    """Reorder both rulebook tabs by column C. Dry-run unless apply is true."""
+    metadata = _metadata(client)
+    results = []
+    for title in (HIDE_TAB, REVIEW_TAB):
+        with sheet_section(state, title):
+            rows = _read_rows(client, title)
+            header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
+            if header[:len(_columns(title))] != _columns(title):
+                raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
+            plan = sort_plan(rows)
+            sheet_id, _row_count = _resolve(metadata, title)
+            requests = sort_requests(sheet_id, rows) if apply else []
+            if apply and requests:
+                client.request(":batchUpdate", body={"requests": requests})
+            results.append({"tab": title, "rows": plan["rows"], "moves": len(plan["moves"]),
+                            "applied": bool(apply and requests), "preview": plan["moves"][:20]})
+    return results
+
+
 def sync_sheet(client, records, state=None):
-    """Insert new comment IDs under the header, newest first. Existing rows are not rewritten."""
+    """Insert each new comment where its 댓글 작성일 belongs. Existing rows are not rewritten."""
     grouped = {}
     for record in records:
         title = tab_for(record)
