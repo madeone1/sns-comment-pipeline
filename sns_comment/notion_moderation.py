@@ -810,12 +810,24 @@ def _insert_toggle(content, toggle):
     return [{"old_str": heading, "new_str": heading + "\n" + toggle + "\n"}]
 
 
-def layout_updates(content, day, hidden, pending_count, database, replace_existing=False):
-    """One table inside the toggle. A table already on this page is moved, not copied.
+def table_link(database):
+    return "[인스타 댓글 사람 판단 표 열기](" + database["url"] + ")"
 
-    Notion's page markdown can place the existing <database> tag, but it cannot add a
-    second filtered linked view inside a toggle. A tag on another page is not copied,
-    because that would move the only table off the page that already shows it.
+
+def link_instead_of_table(content, database):
+    """Swap our embedded table for a plain link. The surrounding toggle text stays."""
+    tag = _owned_database_tag(content, database)
+    if not tag or content.count(tag) != 1:
+        return []
+    return [{"old_str": tag, "new_str": table_link(database)}]
+
+
+def layout_updates(content, day, hidden, pending_count, database, replace_existing=False, embed_tag=""):
+    """Put one table inside the toggle.
+
+    Notion cannot insert a filtered linked view inside a toggle. The same database tag
+    is the table block, so a new weekday page receives that exact tag and the previous
+    page keeps a plain link instead. Another table on the page is never the one we move.
     """
     tag = _owned_database_tag(content, database)
     existing = _comment_toggle(content, day)
@@ -827,6 +839,8 @@ def layout_updates(content, day, hidden, pending_count, database, replace_existi
             embed = tag
     elif tag and tag in existing:
         embed = tag
+    elif embed_tag and embed_tag not in content:
+        embed = embed_tag
     toggle = toggle_markdown(day, hidden, pending_count, embed)
     updates = []
     if removal:
@@ -847,25 +861,109 @@ def toggle_updates(content, day, hidden, pending_count, database):
     return layout_updates(content, day, hidden, pending_count, database, replace_existing=False)
 
 
-def _place_toggle(mcp, page, day, hidden, pending_count, database, sleeper):
+def remember_host(state, page_id):
+    saved, generation = _saved_database(state)
+    if not saved or not page_id or saved.get("host_page_id") == page_id:
+        return saved
+    state.json_put(STATE_NAME, {**saved, "host_page_id": page_id}, generation=generation)
+    return {**saved, "host_page_id": page_id}
+
+
+def _fetch_text(mcp, page):
+    if not isinstance(page, dict) or not page.get("id"):
+        return "", ""
+    if page.get("text"):
+        return page["id"], page["text"]
+    fetched = mcp.call("fetch", {"id": page["id"]})
+    return (fetched.get("id") if isinstance(fetched, dict) else None) or page["id"], _page_text(fetched)
+
+
+def find_table_host(mcp, database, today_id, today_text, finder, today, state):
+    """Page that currently shows the one decision table. Today wins when it already has it."""
+    if _owned_database_tag(today_text, database):
+        return today_id, today_text
+    saved, _generation = _saved_database(state) if state is not None else (None, 0)
+    host_id = (saved or {}).get("host_page_id") or ""
+    if host_id and host_id != today_id:
+        fetched = mcp.call("fetch", {"id": host_id})
+        text = _page_text(fetched)
+        if _owned_database_tag(text, database):
+            return (fetched.get("id") if isinstance(fetched, dict) else None) or host_id, text
+    if finder is None:
+        return "", ""
+    for offset in range(1, 15):
+        day = (today - dt.timedelta(days=offset)).isoformat()
+        try:
+            page = finder(day)
+        except NoDailyPage:
+            continue
+        if not isinstance(page, dict) or not page.get("id") or page["id"] == today_id:
+            continue
+        page_id, text = _fetch_text(mcp, page)
+        if _owned_database_tag(text, database):
+            return page_id, text
+    return "", ""
+
+
+def _apply_content(mcp, page_id, updates, sleeper, failure):
+    if not updates:
+        return
+    result = _finish_async(mcp, mcp.call("update-page", {
+        "page_id": page_id, "command": "update_content", "content_updates": updates, "allow_async": False,
+    }), sleeper)
+    if isinstance(result, dict) and result.get("warnings"):
+        raise PilotError(failure)
+
+
+def install_toggle(mcp, state, page, day, hidden, pending_count, database, finder, today, sleeper,
+                   replace_existing=False, apply=True):
+    """Show the shared table inside this day's toggle. The previous page keeps a link."""
+    text = _page_text(page)
+    host_id, host_text = find_table_host(mcp, database, page["id"], text, finder, today, state)
+    embed = ""
+    if host_id and host_id != page["id"]:
+        embed = _owned_database_tag(host_text, database)
+    updates = layout_updates(text, day, hidden, pending_count, database,
+                             replace_existing=replace_existing, embed_tag=embed)
+    moved = bool(embed and any(embed in change.get("new_str", "") for change in updates))
+    tag_here = _owned_database_tag(text, database)
+    markdown = toggle_markdown(day, hidden, pending_count, embed or (tag_here if tag_here in "".join(
+        change.get("new_str", "") for change in updates) or (tag_here and tag_here in _comment_toggle(text, day)) else ""))
+    if not apply:
+        return {"wrote": False, "updates": updates, "markdown": markdown, "previous": host_id if moved else ""}
+    if updates:
+        _apply_content(mcp, page["id"], updates, sleeper, "일일 업무 토글 추가에 Notion 경고가 있어 완료를 보류합니다.")
+    if moved:
+        # The new page now references the table. Only then swap the old embed for a link.
+        refreshed = mcp.call("fetch", {"id": host_id})
+        link_updates = link_instead_of_table(_page_text(refreshed), database)
+        if link_updates:
+            try:
+                _apply_content(mcp, host_id, link_updates, sleeper,
+                               "이전 날짜의 표를 링크로 바꾸지 못했습니다.")
+            except PilotError as error:
+                _log("notion_previous_link_failed", error=str(error), page_id=host_id)
+    if moved or tag_here:
+        remember_host(state, page["id"])
+    return {"wrote": bool(updates or moved), "updates": updates, "markdown": markdown,
+            "previous": host_id if moved else ""}
+
+
+def _place_toggle(mcp, page, day, hidden, pending_count, database, sleeper, state=None, finder=None, today=None):
     text = _page_text(page)
     if page.get("truncated") and toggle_title(day) not in text:
         raise PilotError("일일 업무 페이지가 잘려 오늘 토글이 있는지 확인하지 못했습니다.")
-    updates = toggle_updates(text, day, hidden, pending_count, database)
-    if not updates:
+    result = install_toggle(mcp, state, page, day, hidden, pending_count, database, finder, today or _today(),
+                            sleeper, replace_existing=False, apply=True)
+    if not result["wrote"]:
         return "unchanged"
-    result = _finish_async(mcp, mcp.call("update-page", {
-        "page_id": page["id"], "command": "update_content", "content_updates": updates, "allow_async": False,
-    }), sleeper)
-    if isinstance(result, dict) and result.get("warnings"):
-        raise PilotError("일일 업무 토글 추가에 Notion 경고가 있어 완료를 보류합니다.")
     checked = mcp.call("fetch", {"id": page["id"]})
     if toggle_title(day) not in _page_text(checked):
         raise PilotError("일일 업무에 댓글 관리 토글이 반영됐는지 확인하지 못했습니다.")
     return "inserted"
 
 
-def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempts=None, wait_seconds=None, sleeper=time.sleep):
+def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempts=None, wait_seconds=None, sleeper=time.sleep, page_finder=None):
     """Append today's toggle. Retry when the daily page does not exist yet."""
     options = _notion_settings(settings)
     attempts = int(attempts if attempts is not None else options.get("summary_attempts") or 4)
@@ -895,7 +993,8 @@ def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempt
     pending = period_pending(_read_rows(sheet, REVIEW_TAB), start, end)
     added = add_pending(mcp, database, pending)
     fill_written_dates(sheet, mcp, database)
-    outcome = _place_toggle(mcp, page, day, hidden, len(pending), database, sleeper)
+    outcome = _place_toggle(mcp, page, day, hidden, len(pending), database, sleeper,
+                            state=state, finder=page_finder, today=_today(now))
     if outcome in {"inserted", "unchanged"}:
         remember_coverage(state, end)
     _log("notion_summary_" + outcome, day=day, hidden=hidden["total"], pending=len(pending),
@@ -976,23 +1075,14 @@ def rewrite_today_toggle(settings, state, sheet, mcp, finder, now=None, apply=Fa
     fresh = mcp.call("fetch", {"id": page["id"]})
     if isinstance(fresh, dict) and fresh.get("truncated"):
         raise PilotError("일일 업무 페이지가 잘려 토글을 다시 쓰지 않습니다.")
-    text = _page_text(fresh if isinstance(fresh, dict) and fresh.get("text") else page)
+    page = {**page, "text": _page_text(fresh if isinstance(fresh, dict) and fresh.get("text") else page)}
     hidden = hidden_between(_read_rows(sheet, HIDE_TAB), start, end)
     pending = period_pending(_read_rows(sheet, REVIEW_TAB), start, end)
-    updates = layout_updates(text, day, hidden, len(pending), database, replace_existing=True)
-    tag = _owned_database_tag(text, database)
-    embed = tag if any(tag and tag in change.get("new_str", "") for change in updates) or (tag and tag in _comment_toggle(text, day)) else ""
-    markdown = toggle_markdown(day, hidden, len(pending), embed)
-    if not apply:
-        return {"status": "preview", "day": day, "updates": len(updates), "markdown": markdown}
-    if not updates:
-        return {"status": "unchanged", "day": day, "markdown": markdown}
-    result = _finish_async(mcp, mcp.call("update-page", {
-        "page_id": page["id"], "command": "update_content", "content_updates": updates, "allow_async": False,
-    }), sleeper)
-    if isinstance(result, dict) and result.get("warnings"):
-        raise PilotError("오늘 토글을 다시 쓰는 중 Notion 경고가 있어 완료를 보류합니다.")
-    return {"status": "rewritten", "day": day, "markdown": markdown}
+    result = install_toggle(mcp, state, page, day, hidden, len(pending), database, finder, _today(now),
+                            sleeper, replace_existing=True, apply=apply)
+    status = "preview" if not apply else ("rewritten" if result["wrote"] else "unchanged")
+    return {"status": status, "day": day, "updates": len(result["updates"]), "markdown": result["markdown"],
+            "previous": result["previous"]}
 
 
 def run_notion_summary(settings, state, now=None, attempts=None, wait_seconds=None, sleeper=time.sleep):
@@ -1018,4 +1108,4 @@ def run_notion_summary(settings, state, now=None, attempts=None, wait_seconds=No
                 "truncated": page.get("truncated")}
 
     return publish_daily_summary(settings, state, sheet, mcp, finder, now=now,
-                                 attempts=attempts, wait_seconds=wait_seconds, sleeper=sleeper)
+                                 attempts=attempts, wait_seconds=wait_seconds, sleeper=sleeper, page_finder=finder)

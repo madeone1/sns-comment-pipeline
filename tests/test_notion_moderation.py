@@ -409,6 +409,58 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(self.notion.pages["daily-page"].count("<database"), 1)
         self.assertEqual(self.notion.pages["daily-page"].count("<mention"), 0)
 
+    def test_next_weekday_toggle_receives_the_shared_table_and_the_old_page_keeps_a_link(self):
+        tag = '<database url="' + DB_URL + '" inline="false">' + DATABASE_TITLE + "</database>"
+        friday = """### Develop
+
+<toggle heading="h3">
+💬 <b>인스타 댓글 관리 (2026-11-13)</b>
+
+어제 숨긴 댓글 0건 (서울 0 · 부산 0 · 속초 0 · 토론토 0)
+
+사람 판단 필요 없음
+
+[📄 규정집 시트 열기](""" + SHEET_URL + """)
+
+""" + tag + """
+</toggle>
+"""
+        self.notion.pages["friday-page"] = friday
+        self.notion.pages["monday-page"] = DAILY_PAGE
+        self.notion.rows.append({"댓글 ID": "older", "결정": "숨김", "url": "https://app.notion.com/p/older"})
+        self.state.json_put("moderation/notion-decision-database.json", {
+            "url": DB_URL, "data_source_url": SOURCE, "database_id": "",
+            "data_source_id": SOURCE.replace("collection://", "")}, 0)
+        monday = dt.datetime(2026, 11, 16, 0, 0, tzinfo=dt.timezone.utc)
+
+        def finder(day):
+            self.assertEqual(day, "2026-11-16")
+            return {"id": "monday-page", "text": self.notion.pages["monday-page"], "truncated": False}
+
+        def page_finder(day):
+            if day == "2026-11-13":
+                return {"id": "friday-page", "text": self.notion.pages["friday-page"], "truncated": False}
+            raise NoDailyPage(day)
+
+        result = publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, finder, now=monday,
+                                       attempts=1, wait_seconds=0, sleeper=self.waits.append, page_finder=page_finder)
+        self.assertEqual(result["status"], "inserted")
+        self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
+        monday_text = self.notion.pages["monday-page"]
+        friday_text = self.notion.pages["friday-page"]
+        self.assertEqual(monday_text.count("<database"), 1)
+        self.assertEqual(friday_text.count("<database"), 0)
+        start = monday_text.index(toggle_title("2026-11-16"))
+        self.assertLess(monday_text.index("<database", start), monday_text.index("</toggle>", start))
+        self.assertIn("11/13(금)~11/15(일) 숨긴 댓글", monday_text)
+        self.assertIn("[인스타 댓글 사람 판단 표 열기](" + DB_URL + ")", friday_text)
+        self.assertNotIn("<mention", monday_text)
+        self.assertIn("### Info", monday_text)
+        self.assertEqual([row["댓글 ID"] for row in self.notion.rows if row["댓글 ID"] == "older"], ["older"])
+        saved, _generation = self.state.json_get("moderation/notion-decision-database.json")
+        self.assertEqual(saved["host_page_id"], "monday-page")
+        self.assertEqual(saved["data_source_url"], SOURCE)
+
     def test_weekend_skips_without_touching_notion(self):
         for day in (dt.datetime(2026, 11, 14, 0, 0, tzinfo=dt.timezone.utc),
                     dt.datetime(2026, 11, 15, 0, 0, tzinfo=dt.timezone.utc)):
