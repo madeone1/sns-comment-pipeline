@@ -232,12 +232,20 @@ def run(settings, state, project, now=None):
                 flush_sheet_log(state, sheet)
             except PilotError as error:
                 log("moderation_sheet_failed", error=str(error))
+            notion = None
+            try:
+                from .notion_moderation import complete_notion_decisions, prepare_notion_decisions
+                notion = prepare_notion_decisions(settings, state, sheet)
+            except PilotError as error:
+                log("notion_decision_unavailable", error=str(error))
             try:
                 from .human_decision import apply_human_decisions
                 decisions = apply_human_decisions(sheet, client)
                 log("human_decision_scan", updates=decisions["updates"], planned=len(decisions["plans"]))
             except PilotError as error:
                 log("human_decision_failed", error=str(error))
+            if notion is not None:
+                complete_notion_decisions(notion, sheet, now=now)
         return result
     finally:
         del token
@@ -248,9 +256,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="새 댓글을 기준표로 분류합니다. 숨김은 설정이 켜진 경우에만 합니다.")
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--backfill-sheet", action="store_true", help="저장된 판단을 기준표 시트에 이어서 붙입니다.")
+    parser.add_argument("--notion-summary", action="store_true", help="오늘 일일 업무에 댓글 관리 토글을 붙입니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if args.notion_summary:
+            from .cloud_state import CloudError
+            from .notion_moderation import run_notion_summary
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            try:
+                with state.lease(1800, "state/notion-summary-lease.json"):
+                    result = run_notion_summary(settings, state)
+            except CloudError as error:
+                if "진행 중" in str(error) or "잠금" in str(error):
+                    log("notion_summary_deferred", reason=str(error))
+                    return 0
+                raise
+            except PilotError as error:
+                log("notion_summary_failed", error=str(error))
+                return 1
+            log("notion_summary_finished", status=result["status"], day=result.get("day"))
+            return 1 if result.get("status") == "failed" else 0
         if args.backfill_sheet:
             state = CloudState(os.environ["SNS_STATE_BUCKET"])
             sheet = open_sheet(settings, state)
