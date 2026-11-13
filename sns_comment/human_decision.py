@@ -110,6 +110,21 @@ def find_comment_row(rows, comment_id):
     return None
 
 
+def set_decision_if_blank(client, comment_id, decision):
+    """Write 담당자 결정 only when that cell is empty. An existing choice is never replaced."""
+    if decision not in {"숨김", "유지"}:
+        return {"result": "skip", "sheet_decision": ""}
+    rows = _read_rows(client, REVIEW_TAB)
+    index = find_comment_row(rows, comment_id)
+    if index is None:
+        return {"result": "missing", "sheet_decision": ""}
+    current = _text(rows[index][DECISION_COLUMN]) if len(rows[index]) > DECISION_COLUMN else ""
+    if current:
+        return {"result": "same" if current == decision else "conflict", "sheet_decision": current}
+    client.request(":batchUpdate", body={"requests": [_cell(REVIEW_SHEET_ID, index, DECISION_COLUMN, decision)]})
+    return {"result": "written", "sheet_decision": decision}
+
+
 def _cell(sheet_id, row_index, column, value):
     if row_index < FIRST_DATA_ROW:
         raise PilotError("사람 판단 안내·머리글 행은 바꾸지 않습니다.")

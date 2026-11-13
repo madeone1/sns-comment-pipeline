@@ -115,6 +115,11 @@
     "batch_size": 20,
     "sheet": {
       "spreadsheet_id": "1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY"
+    },
+    "notion": {
+      "parent_page_id": "4120761a512d817fae8ff53edda31b9e",
+      "summary_attempts": 4,
+      "summary_wait_seconds": 300
     }
   }
 }
