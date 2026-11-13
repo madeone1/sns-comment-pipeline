@@ -187,7 +187,8 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("- 토론토 0건", text)
         self.assertIn(HIDE_URL, text)
         self.assertIn(REVIEW_URL, text)
-        self.assertIn('inline="true">' + DATABASE_TITLE, text)
+        self.assertIn('<mention url="' + DB_URL + '" type="database">' + DATABASE_TITLE + "</mention>", text)
+        self.assertNotIn("<database", self.notion.pages["daily-page"].split(toggle_title(DAY))[1].split("### Info")[0])
         self.assertNotIn("replace_content", [args["command"] for name, args in self.notion.calls if name == "update-page"])
         again = self.publish()
         self.assertEqual(again["status"], "unchanged")
@@ -245,8 +246,8 @@ class SummaryTests(unittest.TestCase):
         self.assertLess(text.index("📣 마케팅 성과 보고서"), text.index(toggle_title(DAY)))
         self.assertLess(text.index(toggle_title(DAY)), text.index("### Info"))
         self.assertEqual(text.count("<database"), 1)
-        self.assertIn('inline="true"', text)
-        self.assertNotIn('inline="false"', text)
+        self.assertIn('inline="false"', text)
+        self.assertIn('<mention url="' + DB_URL + '" type="database">', text)
         self.assertIn("### Meeting", text)
         saved, _generation = self.state.json_get("moderation/notion-decision-database.json")
         self.assertEqual(saved["data_source_url"], SOURCE)
@@ -254,6 +255,53 @@ class SummaryTests(unittest.TestCase):
                                       attempts=1, wait_seconds=0, sleeper=self.waits.append)
         self.assertEqual(again["status"], "unchanged")
         self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
+
+    def test_fragile_page_inserts_only_the_toggle_and_leaves_other_blocks(self):
+        other = "https://app.notion.com/p/otherotherotherotherotherotheroo"
+        page = """### Develop
+
+<toggle heading="h3">
+📊 티켓 판매 인사이트 보고서 (2026-11-13)
+
+판매
+</toggle>
+
+<toggle heading="h3">
+📣 마케팅 성과 보고서 (2026-11-13)
+
+마케팅
+</toggle>
+
+<unknown alt="button" />
+
+![사진](notion-file-block://abc)
+
+<database url=\"""" + other + """\" inline="true">다른 표</database>
+
+<database url=\"""" + DB_URL + """\" data-source-url=\"""" + SOURCE + """\" inline="false">""" + DATABASE_TITLE + """</database>
+"""
+        self.notion.pages[PARENT] = page
+
+        def finder(_day):
+            return {"id": PARENT, "text": self.notion.pages[PARENT], "truncated": False}
+
+        result = publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, finder, now=NOW,
+                                       attempts=1, wait_seconds=0, sleeper=self.waits.append)
+        self.assertEqual(result["status"], "inserted")
+        self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
+        edited = [args for name, args in self.notion.calls if name == "update-page" and args["command"] == "update_content"]
+        old = edited[0]["content_updates"][0]["old_str"]
+        self.assertNotIn("<unknown", old)
+        self.assertNotIn("notion-file-block", old)
+        self.assertNotIn("<database", old)
+        text = self.notion.pages[PARENT]
+        self.assertLess(text.index("📣 마케팅 성과 보고서"), text.index(toggle_title(DAY)))
+        self.assertLess(text.index(toggle_title(DAY)), text.index("<unknown"))
+        self.assertIn('<unknown alt="button" />', text)
+        self.assertIn("notion-file-block://abc", text)
+        self.assertIn('inline="false">' + DATABASE_TITLE, text)
+        self.assertEqual(text.count("<database"), 2)
+        self.assertIn('<mention url="' + DB_URL + '" type="database">', text)
 
     def test_unparsed_create_response_reuses_the_database_instead_of_creating_another(self):
         self.notion.create_response = {"text": "created"}

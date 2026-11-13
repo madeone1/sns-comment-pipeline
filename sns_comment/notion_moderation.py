@@ -160,9 +160,9 @@ def toggle_markdown(day, hidden, pending_count, database):
                   "사람 판단 필요 " + str(pending_count) + "건",
                   "아래 표에서 숨김 또는 유지를 고릅니다. 시트에 이미 결정이 있으면 시트를 유지합니다.",
                   "", "[사람 판단 시트](" + REVIEW_URL + ")"])
-    if database:
-        lines.extend(["", '<database url="' + database["url"] + '" data-source-url="' + database["data_source_url"]
-                      + '" inline="true">' + DATABASE_TITLE + "</database>"])
+    if database and database.get("url"):
+        lines.extend(["", '사람 판단 표: <mention url="' + database["url"] + '" type="database">'
+                      + DATABASE_TITLE + "</mention>"])
     lines.append("</toggle>")
     return "\n".join(lines)
 
@@ -580,53 +580,63 @@ def _last_report_toggle(section):
     return found
 
 
-def _own_database_tag(content, url):
-    for match in DATABASE_TAG.finditer(content):
-        if match.group(2).strip() != DATABASE_TITLE:
+def _unsafe_anchor(text):
+    """Blocks Notion refuses to round-trip: unknown blocks, file images, and database tags."""
+    return "<" in text or "notion-file-block" in text
+
+
+def _insert_anchor(content, report_block):
+    """A unique plain-text edge after one report toggle. The toggle body is not rewritten."""
+    at = content.find(report_block)
+    if at < 0 or not report_block.endswith("</toggle>"):
+        raise PilotError("보고서 토글 끝을 확인하지 못했습니다.")
+    end = at + len(report_block)
+    close = "</toggle>"
+    tail_end = end
+    while tail_end < len(content) and content[tail_end] != "<":
+        tail_end += 1
+    raw_tail = content[end:tail_end]
+    kept = []
+    for part in raw_tail.splitlines(keepends=True):
+        kept.append(part)
+        if part.strip():
+            break
+    tail = "".join(kept)
+    prefix_end = end - len(close)
+    previous_tag = content.rfind(">", 0, prefix_end)
+    prefix = content[previous_tag + 1:prefix_end] if previous_tag >= 0 else ""
+    for index in range(len(prefix) + 1):
+        anchor = prefix[index:] + close + tail
+        if _unsafe_anchor(prefix[index:]) or _unsafe_anchor(tail):
             continue
-        if _attrs(match.group(1)).get("url") == url:
-            return match.group(0)
-    return ""
+        if len(anchor) <= len(close):
+            continue
+        if content.count(anchor) == 1:
+            return anchor, tail
+    raise PilotError("토글을 넣을 위치를 다른 블록을 건드리지 않고 정하지 못했습니다.")
 
 
 def toggle_updates(content, day, hidden, pending_count, database):
-    """Put the h3 toggle in ### Develop and move our own database tag into it."""
+    """Insert one toggle after the report toggles. Leave every other block unchanged."""
     if toggle_title(day) in content:
         return []
     start, end, heading_end = _develop_section(content)
     section = content[start:end]
-    if content.count(section) != 1:
-        raise PilotError("Develop 구역이 여러 번이라 토글 위치를 정하지 못했습니다.")
     toggle = toggle_markdown(day, hidden, pending_count, database)
+    if "<database" in toggle:
+        raise PilotError("사람 판단 표를 새로 만들지 않습니다.")
     report = _last_report_toggle(section)
     if report:
-        if section.count(report) != 1:
+        if content.count(report) != 1:
             raise PilotError("보고서 토글이 겹쳐 위치를 정하지 못했습니다.")
-        new_section = section.replace(report, report + "\n\n" + toggle, 1)
-    else:
-        rel = heading_end - start
-        new_section = section[:rel] + "\n" + toggle + section[rel:]
-    own = _own_database_tag(section, database["url"])
-    if own and own in new_section and own not in toggle:
-        new_section = new_section.replace(own, "", 1)
-    outside = ""
-    if content.count(_own_database_tag(content, database["url"]) or "\0") == 1:
-        tag = _own_database_tag(content, database["url"])
-        if tag and tag not in section:
-            outside = tag
-    if not outside:
-        return [{"old_str": section, "new_str": new_section}]
-    # One replacement keeps the database URL in the document while the old block moves into the toggle.
-    tag_at = content.find(outside)
-    if tag_at > end:
-        old = content[start:tag_at + len(outside)]
-        new = new_section + content[end:tag_at]
-    else:
-        old = content[tag_at:end]
-        new = content[tag_at + len(outside):start] + new_section
-    if content.count(old) != 1:
-        raise PilotError("만든 데이터베이스 블록을 토글 안으로 옮길 위치를 확인하지 못했습니다.")
-    return [{"old_str": old, "new_str": new}]
+        anchor, tail = _insert_anchor(content, report)
+        head = anchor[:-len(tail)] if tail else anchor
+        new = head + "\n\n" + toggle + (("\n" + tail) if tail else "")
+        return [{"old_str": anchor, "new_str": new}]
+    heading = content[start:heading_end]
+    if content.count(heading) != 1 or _unsafe_anchor(heading.replace("###", "", 1)):
+        raise PilotError("Develop 제목만으로 토글 위치를 정하지 못했습니다.")
+    return [{"old_str": heading, "new_str": heading + "\n" + toggle + "\n"}]
 
 
 def _place_toggle(mcp, page, day, hidden, pending_count, database, sleeper):
