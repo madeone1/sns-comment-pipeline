@@ -592,27 +592,34 @@ def _insert_anchor(content, report_block):
         raise PilotError("보고서 토글 끝을 확인하지 못했습니다.")
     end = at + len(report_block)
     close = "</toggle>"
-    tail_end = end
-    while tail_end < len(content) and content[tail_end] != "<":
-        tail_end += 1
-    raw_tail = content[end:tail_end]
-    kept = []
-    for part in raw_tail.splitlines(keepends=True):
-        kept.append(part)
-        if part.strip():
-            break
-    tail = "".join(kept)
     prefix_end = end - len(close)
     previous_tag = content.rfind(">", 0, prefix_end)
     prefix = content[previous_tag + 1:prefix_end] if previous_tag >= 0 else ""
-    for index in range(len(prefix) + 1):
-        anchor = prefix[index:] + close + tail
-        if _unsafe_anchor(prefix[index:]) or _unsafe_anchor(tail):
-            continue
-        if len(anchor) <= len(close):
-            continue
-        if content.count(anchor) == 1:
-            return anchor, tail
+    # </toggle> then --- is repeated in later sections. Extend through the next
+    # plain heading, such as ### Contents schedule, until the boundary is unique.
+    tails = [""]
+    gathered = ""
+    pos = end
+    while pos < len(content):
+        newline = content.find("\n", pos)
+        line = content[pos:] if newline < 0 else content[pos:newline + 1]
+        if "<" in line or "notion-file-block" in line:
+            break
+        gathered += line
+        tails.append(gathered)
+        pos += len(line)
+        if line.strip().startswith("#") or newline < 0:
+            break
+    for tail in tails:
+        for index in range(len(prefix) + 1):
+            piece = prefix[index:]
+            if _unsafe_anchor(piece) or _unsafe_anchor(tail):
+                continue
+            anchor = piece + close + tail
+            if len(anchor) <= len(close):
+                continue
+            if content.count(anchor) == 1:
+                return anchor, tail
     raise PilotError("토글을 넣을 위치를 다른 블록을 건드리지 않고 정하지 못했습니다.")
 
 
