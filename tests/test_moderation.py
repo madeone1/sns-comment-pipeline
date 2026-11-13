@@ -391,6 +391,9 @@ class FakeSheets:
                 if "setDataValidation" in request:
                     self.validations.append(request["setDataValidation"])
                     continue
+                if "insertDimension" in request:
+                    self._insert_rows(request["insertDimension"])
+                    continue
                 self.assert_no_structural_edit(request)
                 update = request["updateCells"]
                 title = next(name for name, tab in self.tabs.items() if tab["id"] == update["range"]["sheetId"])
@@ -414,6 +417,16 @@ class FakeSheets:
             return {"values": self.tabs[title]["rows"]}
         return {"sheets": [{"properties": {"sheetId": tab["id"], "title": name, "gridProperties": {"rowCount": 5000}}}
                            for name, tab in self.tabs.items()]}
+
+    def _insert_rows(self, insert):
+        span = insert["range"]
+        if span.get("dimension") != "ROWS" or span.get("startIndex") != 2 or insert.get("inheritFromBefore") is not False:
+            raise AssertionError("new rows must be inserted under the header with data-row formatting")
+        title = next(name for name, tab in self.tabs.items() if tab["id"] == span["sheetId"])
+        tab = self.tabs[title]
+        width = max((len(row) for row in tab["rows"]), default=13)
+        for _ in range(span["endIndex"] - span["startIndex"]):
+            tab["rows"].insert(span["startIndex"], [""] * width)
 
     def assert_no_structural_edit(self, request):
         if "addSheet" in request or "deleteSheet" in request:
@@ -439,8 +452,9 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
         self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], sheet.original[HIDE_TAB][0])
         self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][1], HIDE_COLUMNS)
-        self.assertEqual(sheet.data(HIDE_TAB)[0][6], "99999")
-        row = sheet.data(HIDE_TAB)[1]
+        self.assertEqual(sheet.data(HIDE_TAB)[1][6], "99999")
+        self.assertEqual(sheet.data(HIDE_TAB)[1][:8], sheet.original[HIDE_TAB][2][:8])
+        row = sheet.data(HIDE_TAB)[0]
         self.assertEqual(row[0], "13")
         self.assertEqual(row[1], "토론토 댓글")
         self.assertEqual(row[2], "2026-11-12 15:10")
@@ -467,7 +481,7 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(hidden["hidden"], 1)
         self.assertEqual(client.hidden, ["30001"])
         self.assertEqual(sheet.data(HIDE_TAB), frozen)
-        self.assertEqual(sheet.data(HIDE_TAB)[1][11], "숨겼을 것(시험)")
+        self.assertEqual(sheet.data(HIDE_TAB)[0][11], "숨겼을 것(시험)")
 
     def test_a_sheet_failure_does_not_block_moderation_and_retries_once(self):
         state, sheet = MemoryState(), FakeSheets()
@@ -483,8 +497,9 @@ class SheetLogTests(unittest.TestCase):
         sheet.fail = False
         moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_busan_official",
                  region="부산", sheet_client=sheet)
-        self.assertEqual(sheet.data(HIDE_TAB)[-1][1], "부산 댓글")
-        self.assertEqual(sheet.data(HIDE_TAB)[-1][11], "숨겼을 것(시험)")
+        self.assertEqual(sheet.data(HIDE_TAB)[0][1], "부산 댓글")
+        self.assertEqual(sheet.data(HIDE_TAB)[0][11], "숨겼을 것(시험)")
+        self.assertEqual(sheet.data(HIDE_TAB)[1][6], "99999")
         moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_busan_official",
                  region="부산", sheet_client=sheet)
         self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
@@ -502,6 +517,11 @@ class SheetLogTests(unittest.TestCase):
         self.assertNotIn("10분 작업", row[12])
         self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][0], sheet.original[REVIEW_TAB][0])
         self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][0][-2:], ["결정 완료", "37 / 37"])
+        rule = sheet.validations[-1]
+        self.assertEqual(rule["range"]["startRowIndex"], 2)
+        self.assertGreater(rule["range"]["endRowIndex"], 2)
+        self.assertTrue(rule["rule"]["strict"])
+        self.assertEqual([item["userEnteredValue"] for item in rule["rule"]["condition"]["values"]], ["숨김", "유지"])
         before = len(sheet.data(REVIEW_TAB))
         moderate([review], state, DRY, Model({}), client=Hides(), account_username="waterbomb_sokcho_official",
                  region="속초", sheet_client=sheet)
@@ -510,7 +530,7 @@ class SheetLogTests(unittest.TestCase):
         model = Model({"30001": {**answer("숨김", "D3"), "id": "30001"}})
         moderate([audience("욕")], state, AUTO_ON, model, client=Hides(GraphError(400, 100)),
                  account_username="waterbomb_official", region="대표(공식)", sheet_client=sheet)
-        failed = sheet.data(HIDE_TAB)[-1]
+        failed = sheet.data(HIDE_TAB)[0]
         self.assertEqual(failed[1], "서울 댓글")
         self.assertEqual(failed[11], "숨김 실패")
         self.assertIn("숨김 요청 실패", failed[12])
@@ -529,11 +549,13 @@ class SheetLogTests(unittest.TestCase):
             "confidence": "high", "rule_id": "K1", "reason": "기존", "text": "기존 댓글"}, 0)
         first = backfill_sheet(state, sheet)
         self.assertEqual(first["synced"], 2)
-        self.assertEqual([row[6] for row in sheet.data(HIDE_TAB)], ["99999", "30001"])
+        self.assertEqual([row[6] for row in sheet.data(HIDE_TAB)], ["30001", "99999"])
         second = backfill_sheet(state, sheet)
         self.assertEqual(len(sheet.data(HIDE_TAB)), 2)
         self.assertEqual(second["synced"], 2)
-        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][2], sheet.original[HIDE_TAB][2])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], sheet.original[HIDE_TAB][0])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][1], sheet.original[HIDE_TAB][1])
+        self.assertEqual(sheet.data(HIDE_TAB)[1], sheet.original[HIDE_TAB][2])
 
     def test_instagram_comment_time_is_stored_and_older_records_stay_blank(self):
         from sns_comment.moderation_job import comment_from_payload
@@ -558,6 +580,28 @@ class SheetLogTests(unittest.TestCase):
         backfill_sheet(state, sheet)
         old = [row for row in sheet.data(HIDE_TAB) if len(row) > 6 and row[6] == "17936497245410609"]
         self.assertEqual(old[0][2], "")
+
+    def test_new_comments_are_inserted_under_the_header_newest_first(self):
+        state, sheet = MemoryState(), FakeSheets()
+        older = audience("먼저", "30061", written="2026-11-12T01:00:00+00:00")
+        newer = audience("나중", "30062", written="2026-11-12T05:00:00+00:00")
+        model = Model({
+            "30061": {**answer("숨김", "D3", reason="앞"), "id": "30061"},
+            "30062": {**answer("숨김", "D3", reason="뒤"), "id": "30062"},
+        })
+        moderate([older, newer], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
+                 region="토론토", sheet_client=sheet)
+        data = sheet.data(HIDE_TAB)
+        self.assertEqual([row[6] for row in data], ["30062", "30061", "99999"])
+        self.assertEqual(data[0][0], "14")
+        self.assertEqual(data[1][0], "13")
+        self.assertEqual(data[2][0], "12")
+        self.assertEqual(data[2], sheet.original[HIDE_TAB][2])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], sheet.original[HIDE_TAB][0])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][1], HIDE_COLUMNS)
+        inserted = [request for body in sheet.updates for request in body["requests"] if "insertDimension" in request]
+        self.assertEqual(inserted[0]["insertDimension"]["range"]["startIndex"], 2)
+        self.assertIs(inserted[0]["insertDimension"]["inheritFromBefore"], False)
 
 
 def review_row(number, comment_id, decision, memo):
@@ -614,6 +658,10 @@ class HumanDecisionTests(unittest.TestCase):
         graph = HumanGraph()
         apply_human_decisions(sheet, graph, now=moment, hide_enabled=True)
         self.assertEqual(graph.calls, ["18111760985229472"])
+        memo_rows = [request["updateCells"]["range"]["startRowIndex"]
+                     for body in sheet.updates for request in body["requests"] if "updateCells" in request]
+        self.assertIn(5, memo_rows)
+        self.assertNotIn(2, memo_rows)
         rows = {row[6]: row for row in sheet.data(REVIEW_TAB)}
         self.assertEqual(rows["18087079217429612"][12], "2026-11-11 15:48 KST 숨김 완료")
         self.assertEqual(rows["18077060762319401"][12], "")

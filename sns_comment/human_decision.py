@@ -99,6 +99,17 @@ def _attempts(memo):
     return int(match.group(1))
 
 
+def find_comment_row(rows, comment_id):
+    """Row index of a comment ID in column G. Header and note rows are never returned."""
+    for index, row in enumerate(rows):
+        if index < FIRST_DATA_ROW:
+            continue
+        found = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+        if found == comment_id:
+            return index
+    return None
+
+
 def _cell(sheet_id, row_index, column, value):
     if row_index < FIRST_DATA_ROW:
         raise PilotError("사람 판단 안내·머리글 행은 바꾸지 않습니다.")
@@ -133,24 +144,25 @@ def apply_human_decisions(client, graph, now=None, hide_enabled=None):
     header = [_text(value) for value in rows[1]] if len(rows) > 1 else []
     if header[:len(REVIEW_COLUMNS)] != REVIEW_COLUMNS:
         raise PilotError("'사람 판단' 머리글이 기준표와 다릅니다.")
-    plans, requests, hidden_ids = [], [], set()
-    for index, row in enumerate(rows[FIRST_DATA_ROW:], start=FIRST_DATA_ROW):
+    plans, updates, hidden_ids = [], [], set()
+    for row in rows[FIRST_DATA_ROW:]:
         decision = _text(row[DECISION_COLUMN]) if len(row) > DECISION_COLUMN else ""
         memo = _text(row[MEMO_COLUMN]) if len(row) > MEMO_COLUMN else ""
         comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
         if not _actionable(decision, memo):
             continue
-        if not re.fullmatch(r"[0-9]{1,30}", comment_id) or comment_id in hidden_ids:
+        index = find_comment_row(rows, comment_id)
+        if index is None or not re.fullmatch(r"[0-9]{1,30}", comment_id) or comment_id in hidden_ids:
             plans.append({"comment_id": comment_id, "decision": decision, "action": "skip"})
             continue
         if decision == "유지":
-            requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, _stamp(now) + " KST 유지 확정"))
+            updates.append((comment_id, _stamp(now) + " KST 유지 확정"))
             plans.append({"comment_id": comment_id, "decision": decision, "action": "keep"})
             _log("human_decision", comment_id=comment_id, decision=decision, action="keep")
             continue
         if not hide_enabled:
             if "숨김 예정(시험)" not in memo:
-                requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, _stamp(now) + " KST 숨김 예정(시험)"))
+                updates.append((comment_id, _stamp(now) + " KST 숨김 예정(시험)"))
             plans.append({"comment_id": comment_id, "decision": decision, "action": "would_hide"})
             _log("human_decision", message="would hide", comment_id=comment_id, decision=decision, action="would_hide")
             continue
@@ -163,14 +175,20 @@ def apply_human_decisions(client, graph, now=None, hide_enabled=None):
             reason = "댓글을 찾지 못했습니다" if permanent else "숨김 요청 실패"
             if isinstance(error, GraphError) and error.status == 429:
                 reason = "API 호출 제한"
-            requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, _failure_memo(now, memo, reason, permanent)))
+            updates.append((comment_id, _failure_memo(now, memo, reason, permanent)))
             plans.append({"comment_id": comment_id, "decision": decision, "action": "failed", "permanent": permanent})
             _log("human_decision_failed", comment_id=comment_id, error=reason, permanent=permanent)
             continue
-        requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, _stamp(now) + " KST 숨김 완료"))
+        updates.append((comment_id, _stamp(now) + " KST 숨김 완료"))
         hidden_ids.add(comment_id)
         plans.append({"comment_id": comment_id, "decision": decision, "action": "hidden"})
         _log("human_decision", comment_id=comment_id, decision=decision, action="hidden")
+    requests = []
+    for comment_id, memo in updates:
+        index = find_comment_row(rows, comment_id)
+        if index is None:
+            continue
+        requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, memo))
     if requests:
         client.request(":batchUpdate", body={"requests": requests})
     return {"plans": plans, "updates": len(requests)}

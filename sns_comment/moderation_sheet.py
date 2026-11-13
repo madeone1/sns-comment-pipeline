@@ -1,7 +1,8 @@
-"""Append moderation rows to the rulebook spreadsheet. Never edit existing rows.
+"""Insert moderation rows under the rulebook header. Never edit existing rows.
 
-Row 1 is a note, row 2 is the header, and data starts on row 3. Comment IDs
-already in column G are left untouched. A sheet error must not stop classification.
+Row 1 is a note, row 2 is the header, and the newest comment is inserted at row 3.
+Older rows keep their order and their 번호. Comment IDs already in column G are
+left untouched. A sheet error must not stop classification.
 """
 
 import datetime as dt
@@ -167,18 +168,20 @@ def _metadata(client):
 def _resolve(metadata, title):
     expected = _sheet_id(title)
     found = None
+    row_count = 0
     for sheet in metadata.get("sheets") or []:
         prop = sheet.get("properties") if isinstance(sheet, dict) else None
         if not isinstance(prop, dict):
             continue
         if prop.get("title") == title and isinstance(prop.get("sheetId"), int):
             found = prop["sheetId"]
+            row_count = int((prop.get("gridProperties") or {}).get("rowCount") or 0)
             break
     if found is None:
         raise PilotError("'" + title + "' 탭이 기준표 시트에 없습니다.")
     if found != expected:
         raise PilotError("'" + title + "' 탭의 시트 ID가 기준표와 다릅니다.")
-    return found
+    return found, row_count
 
 
 def _range(title):
@@ -204,8 +207,43 @@ def _row_request(sheet_id, row_index, values):
             "rows": [{"values": [cell(value) for value in values]}], "fields": "userEnteredValue"}}
 
 
+def _insert_under_header(sheet_id, count):
+    """Insert at the first data row (0-based index 2), directly under the header.
+
+    inheritFromBefore is false so the new rows copy the data row below them,
+    not the header. The note and header stay where they are.
+    """
+    if count < 1:
+        raise PilotError("삽입할 행이 없습니다.")
+    return {"insertDimension": {"range": {"sheetId": sheet_id, "dimension": "ROWS",
+            "startIndex": FIRST_DATA_ROW, "endIndex": FIRST_DATA_ROW + count},
+            "inheritFromBefore": False}}
+
+
+def _decision_validation(end_row):
+    return {"setDataValidation": {"range": {"sheetId": REVIEW_SHEET_ID, "startRowIndex": FIRST_DATA_ROW,
+            "endRowIndex": end_row, "startColumnIndex": 11, "endColumnIndex": 12},
+            "rule": {"condition": {"type": "ONE_OF_LIST", "values": [
+                {"userEnteredValue": "숨김"}, {"userEnteredValue": "유지"}]},
+                "showCustomUi": True, "strict": True}}}
+
+
+def _newest_first(records):
+    return sorted(records, key=lambda record: (
+        str(record.get("written_at") or ""), str(record.get("comment_id") or "")), reverse=True)
+
+
+def _max_number(rows):
+    highest = 0
+    for row in rows[FIRST_DATA_ROW:]:
+        number = _number(row[0] if row else "")
+        if number is not None and number > highest:
+            highest = number
+    return highest
+
+
 def sync_sheet(client, records):
-    """Append rows whose comment ID is not already in column G. Existing rows stay as they are."""
+    """Insert new comment IDs under the header, newest first. Existing rows are not rewritten."""
     grouped = {}
     for record in records:
         title = tab_for(record)
@@ -216,32 +254,35 @@ def sync_sheet(client, records):
     metadata = _metadata(client)
     reflected, requests = [], []
     for title, group in grouped.items():
-        sheet_id = _resolve(metadata, title)
+        sheet_id, row_count = _resolve(metadata, title)
         columns = _columns(title)
         rows = _read_rows(client, title)
         header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
         if header[:len(columns)] != columns:
             raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
         present = set()
-        last_number = 0
         for row in rows[FIRST_DATA_ROW:]:
             comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
             if comment_id:
                 present.add(comment_id)
-            number = _number(row[0] if row else "")
-            if number is not None:
-                last_number = number
-        next_row = max(len(rows), FIRST_DATA_ROW)
-        for record in group:
+        fresh = []
+        for record in _newest_first(group):
             comment_id = str(record.get("comment_id") or "")
             if not comment_id or comment_id in present:
                 reflected.append(record)
                 continue
-            last_number += 1
-            requests.append(_row_request(sheet_id, next_row, row_values(record, last_number)))
             present.add(comment_id)
-            next_row += 1
+            fresh.append(record)
+        if not fresh:
+            continue
+        highest = _max_number(rows)
+        requests.append(_insert_under_header(sheet_id, len(fresh)))
+        for offset, record in enumerate(fresh):
+            number = highest + len(fresh) - offset
+            requests.append(_row_request(sheet_id, FIRST_DATA_ROW + offset, row_values(record, number)))
             reflected.append(record)
+        if title == REVIEW_TAB:
+            requests.append(_decision_validation(max(row_count, len(rows)) + len(fresh)))
     if requests:
         client.request(":batchUpdate", body={"requests": requests})
     return reflected
