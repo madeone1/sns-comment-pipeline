@@ -14,8 +14,8 @@ from sns_comment.human_decision import apply_human_decisions, set_decision_if_bl
 from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB, sync_sheet
 from sns_comment.notion_mcp import NoDailyPage
 from sns_comment.notion_moderation import (
-    DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled, parse_database,
-    coverage_period, fill_written_dates, run_notion_summary, toggle_updates,
+    DATABASE_TITLE, SHEET_URL, _open_locked, hidden_yesterday, notion_decisions_enabled, parse_database,
+    coverage_period, fill_written_dates, layout_updates, rewrite_today_toggle, run_notion_summary, toggle_updates,
     pending_reviews, prepare_notion_decisions, publish_daily_summary, pull_decisions,
     push_results, sheet_memo_status, toggle_title,
 )
@@ -182,13 +182,12 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("### Meeting", text)
         self.assertIn('heading="h3"', text)
         self.assertIn("<b>인스타 댓글 관리 (2026-11-13)</b>", text)
-        self.assertIn("어제 숨긴 댓글 1건", text)
-        self.assertIn("사람 판단 필요 1건", text)
-        self.assertIn("- 서울 1건", text)
-        self.assertIn("- 토론토 0건", text)
-        self.assertIn(HIDE_URL, text)
-        self.assertIn(REVIEW_URL, text)
-        self.assertIn('<mention url="' + DB_URL + '" type="database">' + DATABASE_TITLE + "</mention>", text)
+        self.assertIn("어제 숨긴 댓글 1건 (서울 1 · 부산 0 · 속초 0 · 토론토 0)", text)
+        self.assertIn("사람 판단 필요 1건 — 아래 표에서 숨김/유지를 고르세요", text)
+        self.assertNotIn("- 서울", text)
+        self.assertIn("[📄 규정집 시트 열기](" + SHEET_URL + ")", text)
+        self.assertNotIn("#gid=", text)
+        self.assertNotIn("<mention", text)
         self.assertNotIn("<database", self.notion.pages["daily-page"].split(toggle_title(DAY))[1].split("### Info")[0])
         self.assertNotIn("replace_content", [args["command"] for name, args in self.notion.calls if name == "update-page"])
         again = self.publish()
@@ -248,7 +247,9 @@ class SummaryTests(unittest.TestCase):
         self.assertLess(text.index(toggle_title(DAY)), text.index("### Info"))
         self.assertEqual(text.count("<database"), 1)
         self.assertIn('inline="false"', text)
-        self.assertIn('<mention url="' + DB_URL + '" type="database">', text)
+        self.assertNotIn("<mention", text)
+        start = text.index(toggle_title(DAY))
+        self.assertLess(text.index("<database", start), text.index("</toggle>", start))
         self.assertIn("### Meeting", text)
         saved, _generation = self.state.json_get("moderation/notion-decision-database.json")
         self.assertEqual(saved["data_source_url"], SOURCE)
@@ -291,10 +292,16 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "inserted")
         self.assertFalse(any(name == "create-database" for name, _args in self.notion.calls))
         edited = [args for name, args in self.notion.calls if name == "update-page" and args["command"] == "update_content"]
-        old = edited[0]["content_updates"][0]["old_str"]
-        self.assertNotIn("<unknown", old)
-        self.assertNotIn("notion-file-block", old)
-        self.assertNotIn("<database", old)
+        changes = edited[0]["content_updates"]
+        placed = [change for change in changes if "마케팅" in change["old_str"]]
+        moved = [change for change in changes if DB_URL in change["old_str"]]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(len(moved), 1)
+        self.assertNotIn("<unknown", placed[0]["old_str"])
+        self.assertNotIn("notion-file-block", placed[0]["old_str"])
+        self.assertNotIn("<database", placed[0]["old_str"])
+        self.assertNotIn("<unknown", moved[0]["old_str"])
+        self.assertNotIn(other, moved[0]["old_str"])
         text = self.notion.pages[PARENT]
         self.assertLess(text.index("📣 마케팅 성과 보고서"), text.index(toggle_title(DAY)))
         self.assertLess(text.index(toggle_title(DAY)), text.index("<unknown"))
@@ -302,17 +309,23 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("notion-file-block://abc", text)
         self.assertIn('inline="false">' + DATABASE_TITLE, text)
         self.assertEqual(text.count("<database"), 2)
-        self.assertIn('<mention url="' + DB_URL + '" type="database">', text)
+        self.assertEqual(text.count(other), 1)
+        self.assertNotIn("<mention", text)
+        start = text.index(toggle_title(DAY))
+        self.assertLess(text.index(DB_URL, start), text.index("</toggle>", start))
 
     def test_real_develop_page_anchors_after_the_last_report_toggle(self):
         fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "notion_daily_2026_11_13_develop.md"
         page = fixture.read_text(encoding="utf-8")
         database = {"url": "https://app.notion.com/p/11aabf27f6714bd7ac4fc437a7e5ef65",
                     "data_source_url": "collection://01e6d1b9-96b7-4234-9965-ab1229bbf794"}
-        updates = toggle_updates(page, DAY, {"total": 2, "by_account": {"서울": 2, "부산": 0, "속초": 0, "토론토": 0}}, 1, database)
-        self.assertEqual(len(updates), 1)
-        old = updates[0]["old_str"]
-        new = updates[0]["new_str"]
+        counts = {"total": 2, "by_account": {"서울": 2, "부산": 0, "속초": 0, "토론토": 0}}
+        updates = toggle_updates(page, DAY, counts, 1, database)
+        placed = [change for change in updates if "### Contents schedule" in change["old_str"]]
+        moved = [change for change in updates if "11aabf27" in change["old_str"]]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(len(moved), 1)
+        old, new = placed[0]["old_str"], placed[0]["new_str"]
         self.assertNotIn("notion-file-block", old)
         self.assertNotIn("<unknown", old)
         self.assertNotIn("<database", old)
@@ -320,13 +333,81 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("---", old)
         self.assertIn("### Contents schedule", old)
         self.assertEqual(page.count(old), 1)
-        edited = page.replace(old, new, 1)
+        self.assertNotIn("<unknown", moved[0]["old_str"])
+        self.assertNotIn("notion-file-block", moved[0]["old_str"])
+        edited = page
+        for change in updates:
+            self.assertEqual(edited.count(change["old_str"]), 1)
+            edited = edited.replace(change["old_str"], change["new_str"], 1)
         self.assertLess(edited.index("📈 유튜브 구독자"), edited.index(toggle_title(DAY)))
         self.assertLess(edited.index(toggle_title(DAY)), edited.index("\n---\n\n### Contents schedule"))
-        self.assertIn('<mention url="' + database["url"] + '" type="database">', edited)
+        self.assertNotIn("사람 판단 표:", edited)
+        self.assertNotIn('type="database">' + DATABASE_TITLE, edited)
         self.assertEqual(edited.count("<database"), page.count("<database"))
+        start = edited.index(toggle_title(DAY))
+        self.assertLess(edited.index("11aabf27", start), edited.index("</toggle>", start))
         self.assertIn('alt="button"', edited)
         self.assertEqual(page.count("notion-file-block"), edited.count("notion-file-block"))
+
+    def test_rewrite_puts_one_table_in_todays_toggle_and_preview_does_not_write(self):
+        hidden = {"total": 0, "by_account": {"서울": 0, "부산": 0, "속초": 0, "토론토": 0},
+                  "start": "2026-11-12", "end": "2026-11-12"}
+        old = """<toggle heading="h3">
+💬 <b>인스타 댓글 관리 (2026-11-13)</b>
+
+어제 숨긴 댓글 0건
+
+- 서울 0건
+
+[숨김 대상 시트](https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit#gid=123926565)
+
+사람 판단 표: <mention url=\"""" + DB_URL + """\" type="database">인스타 댓글 사람 판단</mention>
+</toggle>"""
+        page = "### Develop\n\n" + old + "\n\n<unknown alt=\"button\" />\n\n<database url=\"" + DB_URL + "\" inline=\"false\">" + DATABASE_TITLE + "</database>\n### Info\n"
+        database = {"url": DB_URL, "data_source_url": SOURCE}
+        updates = layout_updates(page, DAY, hidden, 1, database, replace_existing=True)
+        text = page
+        for change in updates:
+            self.assertEqual(text.count(change["old_str"]), 1)
+            self.assertNotIn("<unknown", change["old_str"])
+            text = text.replace(change["old_str"], change["new_str"], 1)
+        self.assertEqual(text.count("<database"), 1)
+        self.assertEqual(text.count("<mention"), 0)
+        self.assertIn("어제 숨긴 댓글 0건 (서울 0 · 부산 0 · 속초 0 · 토론토 0)", text)
+        self.assertIn("사람 판단 필요 1건 — 아래 표에서 숨김/유지를 고르세요", text)
+        self.assertIn("[📄 규정집 시트 열기](" + SHEET_URL + ")", text)
+        self.assertNotIn("#gid=", text)
+        start = text.index(toggle_title(DAY))
+        self.assertLess(text.index("<database", start), text.index("</toggle>", start))
+        self.assertIn('<unknown alt="button" />', text)
+        self.assertIn("### Info", text)
+        self.assertEqual(layout_updates(text, DAY, hidden, 1, database, replace_existing=True), [])
+        none = {"total": 0, "by_account": hidden["by_account"], "start": "2026-11-12", "end": "2026-11-12"}
+        quiet = layout_updates(text, DAY, none, 0, database, replace_existing=True)
+        self.assertEqual(len(quiet), 1)
+        self.assertIn("사람 판단 필요 없음", quiet[0]["new_str"])
+        other = "https://app.notion.com/p/otherotherotherotherotherotheroo"
+        untouched = '### Develop\n\n안내\n\n<database url="' + other + '" inline="true">다른 표</database>\n'
+        kept = layout_updates(untouched, DAY, hidden, 0, database, replace_existing=True)
+        edited = untouched
+        for change in kept:
+            edited = edited.replace(change["old_str"], change["new_str"], 1)
+        self.assertIn(other, edited)
+        self.assertEqual(edited.count("<database"), 1)
+        self.notion.pages["daily-page"] = page
+
+        def finder(_day):
+            return {"id": "daily-page", "text": self.notion.pages["daily-page"], "truncated": False}
+
+        preview = rewrite_today_toggle(SETTINGS, self.state, self.sheet, self.notion, finder, now=NOW, apply=False)
+        self.assertEqual(preview["status"], "preview")
+        self.assertEqual(self.notion.pages["daily-page"], page)
+        self.assertFalse(any(name == "update-page" and args.get("command") == "update_content"
+                             for name, args in self.notion.calls))
+        written = rewrite_today_toggle(SETTINGS, self.state, self.sheet, self.notion, finder, now=NOW, apply=True)
+        self.assertEqual(written["status"], "rewritten")
+        self.assertEqual(self.notion.pages["daily-page"].count("<database"), 1)
+        self.assertEqual(self.notion.pages["daily-page"].count("<mention"), 0)
 
     def test_weekend_skips_without_touching_notion(self):
         for day in (dt.datetime(2026, 11, 14, 0, 0, tzinfo=dt.timezone.utc),
@@ -363,11 +444,8 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result["start"], "2026-11-13")
         self.assertEqual(result["end"], "2026-11-15")
         text = self.notion.pages["daily-page"]
-        self.assertIn("11/13(금)~11/15(일) 숨긴 댓글 3건", text)
-        self.assertIn("- 서울 1건", text)
-        self.assertIn("- 부산 1건", text)
-        self.assertIn("- 속초 1건", text)
-        self.assertIn("- 토론토 0건", text)
+        self.assertIn("11/13(금)~11/15(일) 숨긴 댓글 3건 (서울 1 · 부산 1 · 속초 1 · 토론토 0)", text)
+        self.assertNotIn("- 서울", text)
         added = [row["댓글 ID"] for row in self.notion.rows]
         self.assertIn("601", added)
         self.assertNotIn("602", added)

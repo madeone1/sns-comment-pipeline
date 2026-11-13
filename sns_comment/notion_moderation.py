@@ -29,8 +29,9 @@ STATE_NAME = "moderation/notion-decision-database.json"
 COVERAGE_NAME = "moderation/notion-summary-coverage.json"
 MAX_COVERED_DAYS = 7
 WEEKDAYS = "월화수목금토일"
-HIDE_URL = "https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit#gid=123926565"
-REVIEW_URL = "https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit#gid=715862237"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit"
+HIDE_URL = SHEET_URL + "#gid=123926565"
+REVIEW_URL = SHEET_URL + "#gid=715862237"
 ACCOUNTS = ("서울", "부산", "속초", "토론토")
 SCHEMA = (
     'CREATE TABLE ("댓글 원문" TITLE, "계정" SELECT(\'서울\':blue, \'부산\':green, \'속초\':orange, \'토론토\':purple), '
@@ -218,18 +219,24 @@ def sheet_memo_status(memo, now):
     return ""
 
 
-def toggle_markdown(day, hidden, pending_count, database):
+def summary_line(hidden):
+    counts = " · ".join(name + " " + str(hidden["by_account"][name]) for name in ACCOUNTS)
+    return hide_heading(hidden) + " (" + counts + ")"
+
+
+def pending_line(pending_count):
+    if pending_count:
+        return "사람 판단 필요 " + str(pending_count) + "건 — 아래 표에서 숨김/유지를 고르세요"
+    return "사람 판단 필요 없음"
+
+
+def toggle_markdown(day, hidden, pending_count, database_tag=""):
+    """One glance: the count, the decisions still open, one sheet link, and at most one table."""
     lines = ['<toggle heading="h3">', "💬 <b>" + toggle_title(day) + "</b>", "",
-             hide_heading(hidden), ""]
-    for name in ACCOUNTS:
-        lines.append("- " + name + " " + str(hidden["by_account"][name]) + "건")
-    lines.extend(["", "[숨김 대상 시트](" + HIDE_URL + ")", "",
-                  "사람 판단 필요 " + str(pending_count) + "건",
-                  "아래 표에서 숨김 또는 유지를 고릅니다. 시트에 이미 결정이 있으면 시트를 유지합니다.",
-                  "", "[사람 판단 시트](" + REVIEW_URL + ")"])
-    if database and database.get("url"):
-        lines.extend(["", '사람 판단 표: <mention url="' + database["url"] + '" type="database">'
-                      + DATABASE_TITLE + "</mention>"])
+             summary_line(hidden), "", pending_line(pending_count), "",
+             "[📄 규정집 시트 열기](" + SHEET_URL + ")"]
+    if database_tag:
+        lines.extend(["", database_tag])
     lines.append("</toggle>")
     return "\n".join(lines)
 
@@ -722,15 +729,73 @@ def _insert_anchor(content, report_block):
     raise PilotError("토글을 넣을 위치를 다른 블록을 건드리지 않고 정하지 못했습니다.")
 
 
-def toggle_updates(content, day, hidden, pending_count, database):
-    """Insert one toggle after the report toggles. Leave every other block unchanged."""
-    if toggle_title(day) in content:
-        return []
+def _comment_toggle(content, day):
+    """The whole toggle whose title is this day's comment summary, if it is already on the page."""
+    title = toggle_title(day)
+    depth = 0
+    offset = 0
+    open_at = None
+    for line in content.splitlines(keepends=True):
+        end = offset + len(line)
+        if depth == 0 and line.strip().startswith("<toggle"):
+            open_at = offset
+        for match in re.finditer(r"<(/?)toggle\b[^>]*?/?>", line):
+            if match.group(0).endswith("/>"):
+                continue
+            if match.group(1):
+                depth -= 1
+                if depth == 0 and open_at is not None:
+                    block = content[open_at:end]
+                    if block.endswith("\n"):
+                        block = block[:-1]
+                    if title in block:
+                        return block
+                    open_at = None
+            else:
+                depth += 1
+        offset = end
+    return ""
+
+
+def _owned_database_tag(content, database):
+    """The one decision-table tag this job created. Another table on the page is left alone."""
+    url = (database or {}).get("url") or ""
+    found = []
+    for match in DATABASE_TAG.finditer(content):
+        tag = match.group(0)
+        attrs = _attrs(match.group(1))
+        title = re.sub(r"</?b>", "", match.group(2)).strip()
+        if (url and attrs.get("url") == url) or title == DATABASE_TITLE:
+            found.append(tag)
+    if len(set(found)) != 1:
+        return ""
+    return found[0]
+
+
+def _removal(content, tag):
+    """A unique string that drops our table from its old spot and keeps the text in front of it."""
+    at = content.find(tag)
+    if at < 0 or content.find(tag, at + len(tag)) >= 0:
+        return None
+    prefix = ""
+    index = at
+    while index > 0 and content[index - 1] in " \t\r\n":
+        prefix = content[index - 1] + prefix
+        index -= 1
+        candidate = prefix + tag
+        if content.count(candidate) == 1:
+            return candidate, prefix
+    if content.count(tag) == 1:
+        return tag, ""
+    return None
+
+
+def _insert_toggle(content, toggle):
+    """Place a new toggle after the report toggles. The anchor does not include other blocks."""
+    if "<database" in toggle and DATABASE_TITLE not in toggle:
+        raise PilotError("사람 판단 표를 새로 만들지 않습니다.")
     start, end, heading_end = _develop_section(content)
     section = content[start:end]
-    toggle = toggle_markdown(day, hidden, pending_count, database)
-    if "<database" in toggle:
-        raise PilotError("사람 판단 표를 새로 만들지 않습니다.")
     report = _last_report_toggle(section)
     if report:
         if content.count(report) != 1:
@@ -743,6 +808,43 @@ def toggle_updates(content, day, hidden, pending_count, database):
     if content.count(heading) != 1 or _unsafe_anchor(heading.replace("###", "", 1)):
         raise PilotError("Develop 제목만으로 토글 위치를 정하지 못했습니다.")
     return [{"old_str": heading, "new_str": heading + "\n" + toggle + "\n"}]
+
+
+def layout_updates(content, day, hidden, pending_count, database, replace_existing=False):
+    """One table inside the toggle. A table already on this page is moved, not copied.
+
+    Notion's page markdown can place the existing <database> tag, but it cannot add a
+    second filtered linked view inside a toggle. A tag on another page is not copied,
+    because that would move the only table off the page that already shows it.
+    """
+    tag = _owned_database_tag(content, database)
+    existing = _comment_toggle(content, day)
+    embed = ""
+    removal = None
+    if tag and tag not in existing:
+        removal = _removal(content, tag)
+        if removal:
+            embed = tag
+    elif tag and tag in existing:
+        embed = tag
+    toggle = toggle_markdown(day, hidden, pending_count, embed)
+    updates = []
+    if removal:
+        updates.append({"old_str": removal[0], "new_str": removal[1]})
+    if existing:
+        if not replace_existing or existing == toggle:
+            return []
+        updates.append({"old_str": existing, "new_str": toggle})
+        return updates
+    updates.extend(_insert_toggle(content, toggle))
+    return updates
+
+
+def toggle_updates(content, day, hidden, pending_count, database):
+    """Insert one toggle after the report toggles. An existing toggle is left for the rewrite command."""
+    if toggle_title(day) in content:
+        return []
+    return layout_updates(content, day, hidden, pending_count, database, replace_existing=False)
 
 
 def _place_toggle(mcp, page, day, hidden, pending_count, database, sleeper):
@@ -859,6 +961,38 @@ def complete_notion_decisions(context, sheet, now=None):
     except PilotError as error:
         _log("notion_decision_unavailable", error=str(error))
         return None
+
+
+def rewrite_today_toggle(settings, state, sheet, mcp, finder, now=None, apply=False, sleeper=time.sleep):
+    """Rewrite today's comment toggle into the short layout. Preview does not write."""
+    day = _today(now).isoformat()
+    start, end = coverage_period(state, now)
+    page = finder(day)
+    if not isinstance(page, dict) or not page.get("id"):
+        raise PilotError("일일 업무 페이지를 확인하지 못했습니다.")
+    if page.get("truncated"):
+        raise PilotError("일일 업무 페이지가 잘려 토글을 다시 쓰지 않습니다.")
+    database = ensure_database(mcp, state, settings, sleeper=sleeper, pages=(page,))
+    fresh = mcp.call("fetch", {"id": page["id"]})
+    if isinstance(fresh, dict) and fresh.get("truncated"):
+        raise PilotError("일일 업무 페이지가 잘려 토글을 다시 쓰지 않습니다.")
+    text = _page_text(fresh if isinstance(fresh, dict) and fresh.get("text") else page)
+    hidden = hidden_between(_read_rows(sheet, HIDE_TAB), start, end)
+    pending = period_pending(_read_rows(sheet, REVIEW_TAB), start, end)
+    updates = layout_updates(text, day, hidden, len(pending), database, replace_existing=True)
+    tag = _owned_database_tag(text, database)
+    embed = tag if any(tag and tag in change.get("new_str", "") for change in updates) or (tag and tag in _comment_toggle(text, day)) else ""
+    markdown = toggle_markdown(day, hidden, len(pending), embed)
+    if not apply:
+        return {"status": "preview", "day": day, "updates": len(updates), "markdown": markdown}
+    if not updates:
+        return {"status": "unchanged", "day": day, "markdown": markdown}
+    result = _finish_async(mcp, mcp.call("update-page", {
+        "page_id": page["id"], "command": "update_content", "content_updates": updates, "allow_async": False,
+    }), sleeper)
+    if isinstance(result, dict) and result.get("warnings"):
+        raise PilotError("오늘 토글을 다시 쓰는 중 Notion 경고가 있어 완료를 보류합니다.")
+    return {"status": "rewritten", "day": day, "markdown": markdown}
 
 
 def run_notion_summary(settings, state, now=None, attempts=None, wait_seconds=None, sleeper=time.sleep):
