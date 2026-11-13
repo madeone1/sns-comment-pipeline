@@ -61,7 +61,41 @@ class McpToolError(PilotError):
         if self.status:
             detail.append("HTTP " + str(self.status))
         message = "Notion MCP 도구 실패: " + tool
-        super().__init__(message + (" (" + ", ".join(detail) + ")" if detail else " (상세 코드 미제공)"))
+        if detail:
+            message += " (" + ", ".join(detail) + ")"
+        else:
+            message += " (상세 코드 미제공)"
+        body = _safe_notion_message(result)
+        if body:
+            message += ": " + body
+        super().__init__(message)
+
+
+def _safe_notion_message(result):
+    """Keep Notion's validation text and drop tokens or long secrets."""
+    texts = []
+    if isinstance(result, dict):
+        candidates = [result.get("structuredContent")]
+        for item in result.get("content", []) or []:
+            if isinstance(item, dict) and item.get("type") == "text":
+                raw = item.get("text", "")
+                try:
+                    candidates.append(json.loads(raw))
+                except (ValueError, TypeError):
+                    texts.append(raw)
+        for value in candidates:
+            if isinstance(value, dict):
+                for data in (value, value.get("error") if isinstance(value.get("error"), dict) else {}):
+                    if isinstance(data, dict) and isinstance(data.get("message"), str):
+                        texts.append(data["message"])
+    cleaned = []
+    for text in texts:
+        hidden = re.sub(r"(?i)bearer\s+\S+", "", text)
+        hidden = re.sub(r"[A-Za-z0-9_\-]{24,}", "", hidden)
+        hidden = re.sub(r"\s+", " ", hidden).strip(" :,-")
+        if hidden:
+            cleaned.append(hidden)
+    return cleaned[0][:300] if cleaned else ""
 
 
 class McpClient:

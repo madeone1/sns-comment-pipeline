@@ -148,6 +148,12 @@ class NotionTokenTests(unittest.TestCase):
                 error = McpToolError("fetch", {"structuredContent": value})
                 self.assertNotIn(TOKEN, str(error))
         self.assertEqual(McpToolError("fetch", {"structuredContent": {"code": "object_not_found"}}).code, "object_not_found")
+        validation = McpToolError("update-page", {"structuredContent": {
+            "code": "validation_error", "status": 400,
+            "message": "Updating content would delete a child database. token " + TOKEN}})
+        self.assertIn("would delete a child database", str(validation))
+        self.assertIn("HTTP 400", str(validation))
+        self.assertNotIn(TOKEN, str(validation))
 
     def test_invalid_date_stops_before_requesting_any_token_authenticated_endpoint(self):
         with mock.patch.object(notion_token, "McpClient") as client:
