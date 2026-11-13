@@ -299,6 +299,47 @@ def _status_for(choice):
     return "kept"
 
 
+def fetch_written_at(client, comment_id):
+    """Read Instagram's comment timestamp. Never uses the time we noticed the comment."""
+    if client is None or not hasattr(client, "get"):
+        return ""
+    if not isinstance(comment_id, str) or not comment_id.isdigit():
+        return ""
+    try:
+        item = client.get(comment_id, fields="timestamp")
+    except (GraphError, PilotError):
+        return ""
+    raw = item.get("timestamp") if isinstance(item, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        return timestamp(raw.strip())
+    except PilotError:
+        return ""
+
+
+def _has_written_at(record):
+    return isinstance(record, dict) and isinstance(record.get("written_at"), str) and bool(record["written_at"].strip())
+
+
+def _adopt_written_at(state, name, existing, generation, comment):
+    """Keep a timestamp learned on a later read. Do not replace one that is already stored."""
+    if not isinstance(existing, dict) or _has_written_at(existing):
+        return existing
+    written = _stored_written_at(comment, None)
+    if not written:
+        return existing
+    updated = dict(existing)
+    updated["written_at"] = written
+    _put(state, name, updated, generation)
+    return updated
+
+
+def _offer_sheet(records, record):
+    if _has_written_at(record):
+        records.append(record)
+
+
 def _stored_written_at(comment, existing):
     """Keep the Instagram comment time. A missing value stays blank; do not invent one."""
     raw = comment.get("written_at") if isinstance(comment, dict) else None
@@ -574,20 +615,27 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         if not isinstance(comment.get("account_id"), str) or not COMMENT_ID.fullmatch(comment["account_id"]):
             continue
         name = decision_name(comment["account_id"], comment["id"])
+        if not _has_written_at(comment):
+            fetched = fetch_written_at(client, comment["id"])
+            if fetched:
+                comment["written_at"] = fetched
+            else:
+                _log("moderation_written_at_missing", comment_id=comment["id"])
         existing, generation = state.json_get(name)
         preexisting[comment["id"]] = (existing, generation, name)
         if _human_kept(existing) or (isinstance(existing, dict) and existing.get("status") == "hidden"):
+            existing = _adopt_written_at(state, name, existing, generation, comment)
             skipped.append(existing)
-            if isinstance(existing, dict):
-                sheet_records.append(existing)
+            _offer_sheet(sheet_records, existing)
             continue
         action = _pending_hide(existing, comment, sha, settings)
         if action:
             promote.append(comment)
             continue
         if _same(existing, comment, sha):
+            existing = _adopt_written_at(state, name, existing, generation, comment)
             skipped.append(existing)
-            sheet_records.append(existing)
+            _offer_sheet(sheet_records, existing)
             continue
         classify.append(comment)
     summary = {"status": "complete", "classified": 0, "skipped": len(skipped), "would_hide": 0, "hidden": 0,
@@ -672,7 +720,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         _remember_copies(state, written)
     if written or summary["usage"]["calls"]:
         _store_daily(state, written, summary["usage"])
-    sheet_records.extend(written)
+    sheet_records.extend(record for record in written if _has_written_at(record))
     _queue_sheet(state, sheet_records)
     if sheet_client is not None:
         pending, _ = state.json_get(SHEET_PENDING, {"items": {}})

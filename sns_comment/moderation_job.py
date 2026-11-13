@@ -212,6 +212,65 @@ def open_sheet(settings, state):
         return None
 
 
+def account_clients(settings, state):
+    """One Graph client per rulebook account label, using that account's token."""
+    from .moderation_sheet import account_tab
+    registry, _generation = state.json_get(REGISTRY_OBJECT)
+    if not isinstance(registry, dict):
+        registry = initial_registry(settings)
+    configs = [config for config in runtime_configs(settings, registry) if config.get("account_id")]
+    opened, by_label, tokens = {}, {}, []
+    try:
+        for config in configs:
+            label = account_tab({"region": config.get("region_label") or "",
+                                 "account_username": config.get("expected_username") or ""})
+            reference = config.get("_credential_secret_version") or (source_secret(settings) + "/versions/latest")
+            if reference not in opened:
+                token, _name = read_token(state.transport, reference)
+                tokens.append(token)
+                opened[reference] = GraphClient(token, settings["api_version"], max_requests=80,
+                                                api_host=config.get("_meta_api_host", "graph.facebook.com"))
+            by_label[label] = opened[reference]
+        return by_label
+    finally:
+        for token in tokens:
+            del token
+
+
+def comment_time_lookup(clients):
+    """GET /{comment-id}?fields=timestamp only. The account label picks the token."""
+    def lookup(account, comment_id):
+        client = clients.get(account)
+        if client is None:
+            raise PilotError("'" + str(account) + "' 계정의 토큰을 찾지 못했습니다.")
+        if not isinstance(comment_id, str) or not comment_id.isdigit():
+            raise PilotError("댓글 ID 형식을 확인해주세요.")
+        try:
+            item = client.get(comment_id, fields="timestamp")
+        except GraphError as error:
+            if _rate_limited(error):
+                raise PilotError("API 호출 제한") from None
+            raise PilotError("댓글 작성 시각을 읽지 못했습니다.") from None
+        raw = item.get("timestamp") if isinstance(item, dict) else None
+        if not isinstance(raw, str) or not raw.strip():
+            raise PilotError("댓글 작성 시각을 읽지 못했습니다.")
+        return timestamp(raw.strip())
+    return lookup
+
+
+def fill_notion_written_dates(settings, state, sheet):
+    """Copy freshly written sheet dates into blank Notion 작성일 cells. Does not overwrite a value."""
+    from .notion_moderation import _open_locked, ensure_database, fill_written_dates, notion_decisions_enabled
+    if not notion_decisions_enabled():
+        return []
+    opened = _open_locked(settings, state)
+    if opened is None:
+        return []
+    mcp, _reader = opened
+    database = ensure_database(mcp, state, settings)
+    return fill_written_dates(sheet, mcp, database)
+
+
 def run(settings, state, project, now=None):
     registry, _ = state.json_get(REGISTRY_OBJECT)
     if not isinstance(registry, dict):
@@ -258,10 +317,28 @@ def main(argv=None):
     parser.add_argument("--backfill-sheet", action="store_true", help="저장된 판단을 기준표 시트에 이어서 붙입니다.")
     parser.add_argument("--notion-summary", action="store_true", help="오늘 일일 업무에 댓글 관리 토글을 붙입니다.")
     parser.add_argument("--sort-sheet", action="store_true", help="기준표 데이터 행을 댓글 작성일 내림차순으로 정렬합니다. 기본은 미리보기입니다.")
-    parser.add_argument("--apply", action="store_true", help="--sort-sheet 와 함께 쓰면 정렬을 시트에 반영합니다.")
+    parser.add_argument("--fill-missing-dates", action="store_true", help="C열이 비어 있는 행의 인스타 작성 시각을 읽고, 반영 시 그 시각으로 다시 정렬합니다. 기본은 미리보기입니다.")
+    parser.add_argument("--apply", action="store_true", help="--sort-sheet 또는 --fill-missing-dates 와 함께 쓰면 시트에 반영합니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if args.fill_missing_dates:
+            from .moderation_sheet import fill_missing_dates
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            sheet = open_sheet(settings, state)
+            if sheet is None:
+                log("moderation_sheet_unavailable", error="기준표 시트를 열 수 없습니다.")
+                return 1
+            clients = account_clients(settings, state)
+            result = fill_missing_dates(sheet, state, comment_time_lookup(clients), apply=args.apply)
+            notion_filled = []
+            if args.apply:
+                try:
+                    notion_filled = fill_notion_written_dates(settings, state, sheet)
+                except PilotError as error:
+                    log("notion_written_at_unavailable", error=str(error))
+            log("sheet_dates_filled", apply=args.apply, tabs=result["rows"], notion_filled=notion_filled)
+            return 0
         if args.sort_sheet:
             from .moderation_sheet import sort_tabs
             state = CloudState(os.environ["SNS_STATE_BUCKET"])
