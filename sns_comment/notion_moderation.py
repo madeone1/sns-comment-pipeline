@@ -26,6 +26,9 @@ KST = dt.timezone(dt.timedelta(hours=9))
 PARENT_PAGE_ID = "4120761a512d817fae8ff53edda31b9e"
 DATABASE_TITLE = "인스타 댓글 사람 판단"
 STATE_NAME = "moderation/notion-decision-database.json"
+COVERAGE_NAME = "moderation/notion-summary-coverage.json"
+MAX_COVERED_DAYS = 7
+WEEKDAYS = "월화수목금토일"
 HIDE_URL = "https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit#gid=123926565"
 REVIEW_URL = "https://docs.google.com/spreadsheets/d/1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY/edit#gid=715862237"
 ACCOUNTS = ("서울", "부산", "속초", "토론토")
@@ -89,19 +92,72 @@ def account_name(label):
     return ""
 
 
-def hidden_yesterday(rows, yesterday):
-    """Count 숨김 완료 rows whose note date is yesterday. Other statuses stay out."""
+def is_weekend(now=None):
+    return _today(now).weekday() >= 5
+
+
+def coverage_period(state, now=None):
+    """Days to include: the day after the last summary through yesterday, at most one week."""
+    today = _today(now)
+    end = today - dt.timedelta(days=1)
+    saved, _generation = state.json_get(COVERAGE_NAME) if state is not None else (None, 0)
+    start = None
+    if isinstance(saved, dict):
+        try:
+            start = dt.date.fromisoformat(saved.get("covered_through") or "") + dt.timedelta(days=1)
+        except ValueError:
+            start = None
+    if start is None:
+        start = end - dt.timedelta(days=2) if today.weekday() == 0 else end
+    if start > end:
+        start = end
+    if (end - start).days + 1 > MAX_COVERED_DAYS:
+        start = end - dt.timedelta(days=MAX_COVERED_DAYS - 1)
+    return start.isoformat(), end.isoformat()
+
+
+def remember_coverage(state, end):
+    current, generation = state.json_get(COVERAGE_NAME)
+    if isinstance(current, dict) and current.get("covered_through") == end:
+        return
+    state.json_put(COVERAGE_NAME, {"covered_through": end}, generation=generation)
+
+
+def _noted_day(value):
+    match = NOTE_DAY.match(value or "")
+    return match.group(1) if match else ""
+
+
+def hidden_between(rows, start, end):
+    """Count 숨김 완료 rows whose note date falls in the inclusive range."""
     counts = {name: 0 for name in ACCOUNTS}
     for row in rows[FIRST_DATA_ROW:]:
         if _cell(row, 11) != "숨김 완료":
             continue
-        match = NOTE_DAY.match(_cell(row, 12))
-        if not match or match.group(1) != yesterday:
+        day = _noted_day(_cell(row, 12))
+        if not day or not (start <= day <= end):
             continue
         name = account_name(_cell(row, 1))
         if name:
             counts[name] += 1
-    return {"total": sum(counts.values()), "by_account": counts}
+    return {"total": sum(counts.values()), "by_account": counts, "start": start, "end": end}
+
+
+def hidden_yesterday(rows, yesterday):
+    """Count 숨김 완료 rows whose note date is yesterday. Other statuses stay out."""
+    return hidden_between(rows, yesterday, yesterday)
+
+
+def _korean_day(day):
+    parsed = dt.date.fromisoformat(day)
+    return str(parsed.month) + "/" + str(parsed.day) + "(" + WEEKDAYS[parsed.weekday()] + ")"
+
+
+def hide_heading(hidden):
+    start, end = hidden.get("start"), hidden.get("end")
+    if not start or not end or start == end:
+        return "어제 숨긴 댓글 " + str(hidden["total"]) + "건"
+    return _korean_day(hidden["start"]) + "~" + _korean_day(hidden["end"]) + " 숨긴 댓글 " + str(hidden["total"]) + "건"
 
 
 def pending_reviews(rows):
@@ -130,6 +186,17 @@ def pending_reviews(rows):
     return found
 
 
+def period_pending(rows, start, end):
+    """Pending rows detected in the range. A row with no date is still included."""
+    chosen = []
+    for item in pending_reviews(rows):
+        day = _noted_day(item["memo"]) or _noted_day(item["written"])
+        if day and not (start <= day <= end):
+            continue
+        chosen.append(item)
+    return chosen
+
+
 def sheet_memo_status(memo, now):
     if "숨김 완료" in memo:
         clock = NOTE_CLOCK.search(memo)
@@ -153,7 +220,7 @@ def sheet_memo_status(memo, now):
 
 def toggle_markdown(day, hidden, pending_count, database):
     lines = ['<toggle heading="h3">', "💬 <b>" + toggle_title(day) + "</b>", "",
-             "어제 숨긴 댓글 " + str(hidden["total"]) + "건", ""]
+             hide_heading(hidden), ""]
     for name in ACCOUNTS:
         lines.append("- " + name + " " + str(hidden["by_account"][name]) + "건")
     lines.extend(["", "[숨김 대상 시트](" + HIDE_URL + ")", "",
@@ -388,7 +455,7 @@ def _source_id(database):
 
 def _query(mcp, database, where="", params=None):
     source = database["data_source_url"]
-    sql = 'SELECT url, "댓글 ID", "결정", "상태" FROM "' + source + '"'
+    sql = 'SELECT url, "댓글 ID", "결정", "상태", "작성일(KST)" FROM "' + source + '"'
     if where:
         sql += " WHERE " + where
     sql += " LIMIT 100"
@@ -416,7 +483,8 @@ def _plain(value):
 
 def _notion_row(row):
     return {"url": _plain(row.get("url")), "comment_id": _plain(row.get("댓글 ID")),
-            "decision": _plain(row.get("결정")), "status": _plain(row.get("상태"))}
+            "decision": _plain(row.get("결정")), "status": _plain(row.get("상태")),
+            "written": _plain(row.get("작성일(KST)"))}
 
 
 def _properties(item, status):
@@ -479,13 +547,44 @@ def pull_decisions(sheet, mcp, database, state=None):
     return outcomes
 
 
-def _set_status(mcp, page_id, status):
+def _set_properties(mcp, page_id, properties):
     result = _finish_async(mcp, mcp.call("update-page", {
         "page_id": page_id, "command": "update_properties",
-        "properties": {"상태": status}, "allow_async": False,
+        "properties": properties, "allow_async": False,
     }), time.sleep)
     if isinstance(result, dict) and result.get("warnings"):
         raise PilotError("Notion 상태 기록에 경고가 있어 완료를 보류합니다.")
+
+
+def _set_status(mcp, page_id, status):
+    _set_properties(mcp, page_id, {"상태": status})
+
+
+def _sheet_written(sheet, comment_id):
+    for title in (REVIEW_TAB, HIDE_TAB):
+        rows = _read_rows(sheet, title)
+        index = find_comment_row(rows, comment_id)
+        if index is None:
+            continue
+        written = _cell(rows[index], 2)
+        if written:
+            return written
+    return ""
+
+
+def fill_written_dates(sheet, mcp, database):
+    """Copy a blank Notion 작성일 from the sheet's 댓글 작성일 column. Do not overwrite a value."""
+    filled = []
+    for row in _query(mcp, database):
+        if row.get("written") or not row.get("comment_id") or not row.get("url"):
+            continue
+        written = _sheet_written(sheet, row["comment_id"])
+        if not written:
+            continue
+        _set_properties(mcp, row["url"], {"작성일(KST)": written})
+        filled.append(row["comment_id"])
+        _log("notion_written_at_filled", comment_id=row["comment_id"])
+    return filled
 
 
 def push_results(sheet, mcp, database, now=None):
@@ -669,8 +768,11 @@ def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempt
     options = _notion_settings(settings)
     attempts = int(attempts if attempts is not None else options.get("summary_attempts") or 4)
     wait_seconds = int(wait_seconds if wait_seconds is not None else options.get("summary_wait_seconds") or 300)
+    if is_weekend(now):
+        _log("notion_summary_weekend_skip", message="weekend skip", day=_today(now).isoformat())
+        return {"status": "weekend_skip", "day": _today(now).isoformat()}
     day = _today(now).isoformat()
-    yesterday = (_today(now) - dt.timedelta(days=1)).isoformat()
+    start, end = coverage_period(state, now)
     page = None
     for attempt in range(attempts):
         try:
@@ -687,13 +789,17 @@ def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempt
     fresh = mcp.call("fetch", {"id": page["id"]})
     if isinstance(fresh, dict) and isinstance(fresh.get("text"), str):
         page = {**page, "text": fresh["text"], "truncated": fresh.get("truncated")}
-    hidden = hidden_yesterday(_read_rows(sheet, HIDE_TAB), yesterday)
-    pending = pending_reviews(_read_rows(sheet, REVIEW_TAB))
+    hidden = hidden_between(_read_rows(sheet, HIDE_TAB), start, end)
+    pending = period_pending(_read_rows(sheet, REVIEW_TAB), start, end)
     added = add_pending(mcp, database, pending)
+    fill_written_dates(sheet, mcp, database)
     outcome = _place_toggle(mcp, page, day, hidden, len(pending), database, sleeper)
-    _log("notion_summary_" + outcome, day=day, hidden=hidden["total"], pending=len(pending))
+    if outcome in {"inserted", "unchanged"}:
+        remember_coverage(state, end)
+    _log("notion_summary_" + outcome, day=day, hidden=hidden["total"], pending=len(pending),
+         start=start, end=end)
     return {"status": outcome, "day": day, "page_id": page["id"], "hidden": hidden["total"],
-            "pending": len(pending), "added": len(added), "database": database}
+            "pending": len(pending), "added": len(added), "database": database, "start": start, "end": end}
 
 
 def _open_locked(settings, state, attempts=4, wait_seconds=15, sleeper=time.sleep):
@@ -748,7 +854,8 @@ def complete_notion_decisions(context, sheet, now=None):
     try:
         pushed = push_results(sheet, context["mcp"], context["database"], now=now)
         added = add_pending(context["mcp"], context["database"], pending_reviews(_read_rows(sheet, REVIEW_TAB)))
-        return {"pushed": pushed, "added": len(added)}
+        filled = fill_written_dates(sheet, context["mcp"], context["database"])
+        return {"pushed": pushed, "added": len(added), "filled": len(filled)}
     except PilotError as error:
         _log("notion_decision_unavailable", error=str(error))
         return None
@@ -758,6 +865,9 @@ def run_notion_summary(settings, state, now=None, attempts=None, wait_seconds=No
     if not notion_decisions_enabled():
         _log("notion_summary_off")
         return {"status": "off"}
+    if is_weekend(now):
+        _log("notion_summary_weekend_skip", message="weekend skip", day=_today(now).isoformat())
+        return {"status": "weekend_skip", "day": _today(now).isoformat()}
     from .moderation_job import open_sheet
     sheet = open_sheet(settings, state)
     if sheet is None:

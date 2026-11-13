@@ -15,7 +15,7 @@ from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB, sync_sheet
 from sns_comment.notion_mcp import NoDailyPage
 from sns_comment.notion_moderation import (
     DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled, parse_database,
-    toggle_updates,
+    coverage_period, fill_written_dates, run_notion_summary, toggle_updates,
     pending_reviews, prepare_notion_decisions, publish_daily_summary, pull_decisions,
     push_results, sheet_memo_status, toggle_title,
 )
@@ -111,7 +111,7 @@ class FakeNotion:
             if args["command"] == "update_properties":
                 for row in self.rows:
                     if row.get("url") == args["page_id"]:
-                        row["상태"] = args["properties"]["상태"]
+                        row.update(args["properties"])
                 return {}
             raise AssertionError(args["command"])
         raise AssertionError(name)
@@ -154,7 +154,7 @@ class SummaryTests(unittest.TestCase):
         self.state = MemoryState()
         self.sheet = FakeSheets()
         self.sheet.tabs[HIDE_TAB]["rows"].append(hide_row("서울 댓글", "81", "숨김 완료", "2026-11-12 18:02 KST 자동 감지"))
-        self.sheet.tabs[REVIEW_TAB]["rows"].append(review_row("82", "", "2026-11-13 08:10 KST 자동 감지", text="확인할 댓글"))
+        self.sheet.tabs[REVIEW_TAB]["rows"].append(review_row("82", "", "2026-11-12 08:10 KST 자동 감지", text="확인할 댓글"))
         self.ready = True
         self.waits = []
 
@@ -327,6 +327,70 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(edited.count("<database"), page.count("<database"))
         self.assertIn('alt="button"', edited)
         self.assertEqual(page.count("notion-file-block"), edited.count("notion-file-block"))
+
+    def test_weekend_skips_without_touching_notion(self):
+        for day in (dt.datetime(2026, 11, 14, 0, 0, tzinfo=dt.timezone.utc),
+                    dt.datetime(2026, 11, 15, 0, 0, tzinfo=dt.timezone.utc)):
+            with mock.patch.dict(os.environ, {"SNS_NOTION_DECISIONS": "1"}), \
+                    mock.patch("sns_comment.notion_moderation.open_notion") as opened:
+                result = run_notion_summary(SETTINGS, MemoryState(), now=day)
+            self.assertEqual(result["status"], "weekend_skip")
+            opened.assert_not_called()
+            self.assertFalse(any(name == "update-page" for name, _args in self.notion.calls))
+
+    def test_monday_covers_friday_through_sunday_after_the_last_summary(self):
+        self.state.json_put("moderation/notion-summary-coverage.json", {"covered_through": "2026-11-12"})
+        monday = dt.datetime(2026, 11, 16, 0, 0, tzinfo=dt.timezone.utc)
+        self.assertEqual(coverage_period(self.state, monday), ("2026-11-13", "2026-11-15"))
+        self.sheet.tabs[HIDE_TAB]["rows"].extend([
+            hide_row("서울 댓글", "501", "숨김 완료", "2026-11-13 18:00 KST 자동 감지"),
+            hide_row("부산 댓글", "502", "숨김 완료", "2026-11-14 12:00 KST 자동 감지"),
+            hide_row("속초 댓글", "503", "숨김 완료", "2026-11-15 09:00 KST 자동 감지"),
+            hide_row("토론토 댓글", "504", "숨김 완료", "2026-11-12 09:00 KST 자동 감지"),
+        ])
+        self.sheet.tabs[REVIEW_TAB]["rows"].extend([
+            review_row("601", "", "2026-11-14 10:00 KST 자동 감지"),
+            review_row("602", "", "2026-11-01 10:00 KST 자동 감지"),
+        ])
+
+        def finder(day):
+            self.assertEqual(day, "2026-11-16")
+            return {"id": "daily-page", "text": self.notion.pages["daily-page"], "truncated": False}
+
+        result = publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, finder, now=monday,
+                                       attempts=1, wait_seconds=0, sleeper=self.waits.append)
+        self.assertEqual(result["status"], "inserted")
+        self.assertEqual(result["start"], "2026-11-13")
+        self.assertEqual(result["end"], "2026-11-15")
+        text = self.notion.pages["daily-page"]
+        self.assertIn("11/13(금)~11/15(일) 숨긴 댓글 3건", text)
+        self.assertIn("- 서울 1건", text)
+        self.assertIn("- 부산 1건", text)
+        self.assertIn("- 속초 1건", text)
+        self.assertIn("- 토론토 0건", text)
+        added = [row["댓글 ID"] for row in self.notion.rows]
+        self.assertIn("601", added)
+        self.assertNotIn("602", added)
+        saved, _generation = self.state.json_get("moderation/notion-summary-coverage.json")
+        self.assertEqual(saved["covered_through"], "2026-11-15")
+        tuesday = dt.datetime(2026, 11, 17, 0, 0, tzinfo=dt.timezone.utc)
+        self.assertEqual(coverage_period(self.state, tuesday), ("2026-11-16", "2026-11-16"))
+        capped = MemoryState()
+        capped.json_put("moderation/notion-summary-coverage.json", {"covered_through": "2026-10-01"})
+        self.assertEqual(coverage_period(capped, NOW), ("2026-11-06", "2026-11-12"))
+
+    def test_blank_notion_written_date_is_copied_from_the_sheet(self):
+        from sns_comment.notion_moderation import fill_written_dates
+        comment = "17936497245410609"
+        self.sheet.tabs[REVIEW_TAB]["rows"].append(review_row(comment, "", "2026-11-12 17:05 KST 자동 감지"))
+        self.notion.rows.append({"url": "https://app.notion.com/p/" + comment, "댓글 ID": comment,
+                                 "결정": "", "상태": "사람 판단 대기", "작성일(KST)": ""})
+        database = {"url": DB_URL, "data_source_url": SOURCE}
+        filled = fill_written_dates(self.sheet, self.notion, database)
+        self.assertEqual(filled, [comment])
+        self.assertEqual(self.notion.rows[-1]["작성일(KST)"], "2026-11-12 09:00")
+        filled_again = fill_written_dates(self.sheet, self.notion, database)
+        self.assertEqual(filled_again, [])
 
     def test_unparsed_create_response_reuses_the_database_instead_of_creating_another(self):
         self.notion.create_response = {"text": "created"}
