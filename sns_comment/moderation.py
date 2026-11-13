@@ -414,7 +414,7 @@ def flush_sheet_log(state, client):
             continue
         records.append(record)
         located.append((key, name, gen, record))
-    reflected = sync_sheet(client, records) if records else []
+    reflected = sync_sheet(client, records, state=state) if records else []
     done = {(item.get("account_id"), item.get("comment_id")) for item in reflected}
     for key, name, gen, record in located:
         if (record.get("account_id"), record.get("comment_id")) not in done:
@@ -449,7 +449,7 @@ def backfill_sheet(state, client):
         if tab_for(record) and display_status(record):
             located.append((name, generation, record))
             records.append(record)
-    reflected = sync_sheet(client, records) if records else []
+    reflected = sync_sheet(client, records, state=state) if records else []
     done = {(item.get("account_id"), item.get("comment_id")) for item in reflected}
     marked = 0
     for name, generation, record in located:
@@ -468,8 +468,11 @@ def _put(state, name, value, generation):
         if error.status != 412:
             raise
         current, generation = state.json_get(name, {})
-        if isinstance(current, dict) and (current.get("human_decision") == KEEP_LABEL or current.get("status") == "hidden"):
-            return generation
+        if isinstance(current, dict) and isinstance(value, dict):
+            if current.get("human_decision") == KEEP_LABEL or current.get("status") == "hidden":
+                return generation
+            if current.get("updated_at") and value.get("updated_at") and str(current["updated_at"]) >= str(value["updated_at"]):
+                return generation
         return state.json_put(name, value, generation)
 
 

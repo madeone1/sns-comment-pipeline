@@ -5,10 +5,12 @@ Older rows keep their order and their 번호. Comment IDs already in column G ar
 left untouched. A sheet error must not stop classification.
 """
 
+import contextlib
 import datetime as dt
 import urllib.parse
 
 from .api import PilotError
+from .cloud_state import SHEET_HIDE_LEASE, SHEET_REVIEW_LEASE, lease_retry
 from .sheets import cell
 
 
@@ -242,7 +244,60 @@ def _max_number(rows):
     return highest
 
 
-def sync_sheet(client, records):
+def sheet_lease_name(title):
+    if title == HIDE_TAB:
+        return SHEET_HIDE_LEASE
+    if title == REVIEW_TAB:
+        return SHEET_REVIEW_LEASE
+    raise PilotError("알 수 없는 기준표 탭입니다.")
+
+
+@contextlib.contextmanager
+def sheet_section(state, title):
+    """Hold one tab's lock around the read, the number, and the write."""
+    if state is None or not hasattr(state, "lease"):
+        yield
+        return
+    with lease_retry(state, 120, sheet_lease_name(title), attempts=5, wait_seconds=1):
+        yield
+
+
+def _sync_tab(client, metadata, title, group):
+    sheet_id, row_count = _resolve(metadata, title)
+    columns = _columns(title)
+    rows = _read_rows(client, title)
+    header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
+    if header[:len(columns)] != columns:
+        raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
+    present = set()
+    for row in rows[FIRST_DATA_ROW:]:
+        comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
+        if comment_id:
+            present.add(comment_id)
+    fresh = []
+    reflected = []
+    for record in _newest_first(group):
+        comment_id = str(record.get("comment_id") or "")
+        if not comment_id or comment_id in present:
+            reflected.append(record)
+            continue
+        present.add(comment_id)
+        fresh.append(record)
+    if not fresh:
+        return reflected
+    highest = _max_number(rows)
+    requests = [_insert_under_header(sheet_id, len(fresh))]
+    for offset, record in enumerate(fresh):
+        number = highest + len(fresh) - offset
+        requests.append(_row_request(sheet_id, FIRST_DATA_ROW + offset, row_values(record, number)))
+        reflected.append(record)
+    if title == REVIEW_TAB:
+        requests.append(_decision_validation(max(row_count, len(rows)) + len(fresh)))
+    client.request(":batchUpdate", body={"requests": requests})
+    return reflected
+
+
+def sync_sheet(client, records, state=None):
     """Insert new comment IDs under the header, newest first. Existing rows are not rewritten."""
     grouped = {}
     for record in records:
@@ -251,38 +306,8 @@ def sync_sheet(client, records):
             grouped.setdefault(title, []).append(record)
     if not grouped:
         return []
-    metadata = _metadata(client)
-    reflected, requests = [], []
+    reflected = []
     for title, group in grouped.items():
-        sheet_id, row_count = _resolve(metadata, title)
-        columns = _columns(title)
-        rows = _read_rows(client, title)
-        header = [_text(value) for value in rows[HEADER_ROW]] if len(rows) > HEADER_ROW else []
-        if header[:len(columns)] != columns:
-            raise PilotError("'" + title + "' 머리글이 기준표와 다릅니다.")
-        present = set()
-        for row in rows[FIRST_DATA_ROW:]:
-            comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
-            if comment_id:
-                present.add(comment_id)
-        fresh = []
-        for record in _newest_first(group):
-            comment_id = str(record.get("comment_id") or "")
-            if not comment_id or comment_id in present:
-                reflected.append(record)
-                continue
-            present.add(comment_id)
-            fresh.append(record)
-        if not fresh:
-            continue
-        highest = _max_number(rows)
-        requests.append(_insert_under_header(sheet_id, len(fresh)))
-        for offset, record in enumerate(fresh):
-            number = highest + len(fresh) - offset
-            requests.append(_row_request(sheet_id, FIRST_DATA_ROW + offset, row_values(record, number)))
-            reflected.append(record)
-        if title == REVIEW_TAB:
-            requests.append(_decision_validation(max(row_count, len(rows)) + len(fresh)))
-    if requests:
-        client.request(":batchUpdate", body={"requests": requests})
+        with sheet_section(state, title):
+            reflected.extend(_sync_tab(client, _metadata(client), title, group))
     return reflected

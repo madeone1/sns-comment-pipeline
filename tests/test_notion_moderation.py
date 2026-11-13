@@ -1,15 +1,20 @@
+import contextlib
 import copy
 import datetime as dt
+import importlib.util
 import os
+import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from sns_comment.api import PilotError
-from sns_comment.human_decision import set_decision_if_blank
-from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB
+from sns_comment.cloud_state import SHEET_HIDE_LEASE, CloudError
+from sns_comment.human_decision import apply_human_decisions, set_decision_if_blank
+from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB, sync_sheet
 from sns_comment.notion_mcp import NoDailyPage
 from sns_comment.notion_moderation import (
-    DATABASE_TITLE, HIDE_URL, REVIEW_URL, hidden_yesterday, notion_decisions_enabled,
+    DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled,
     pending_reviews, prepare_notion_decisions, publish_daily_summary, pull_decisions,
     push_results, sheet_memo_status, toggle_title,
 )
@@ -233,6 +238,122 @@ class DecisionSyncTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SNS_NOTION_DECISIONS": "1"}), \
              mock.patch("sns_comment.notion_moderation.open_notion", side_effect=PilotError("권한 없음")):
             self.assertIsNone(prepare_notion_decisions(SETTINGS, MemoryState(), self.sheet))
+
+
+class LockState:
+    def __init__(self):
+        self.locks = {}
+        self.names = []
+
+    @contextlib.contextmanager
+    def lease(self, seconds=3900, name="state/lease.json"):
+        self.names.append(name)
+        lock = self.locks.setdefault(name, threading.Lock())
+        if not lock.acquire(timeout=3):
+            raise CloudError("다른 클라우드 실행이 진행 중입니다")
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+def sheet_record(comment_id, written):
+    return {"status": "hidden", "comment_id": comment_id, "region": "서울", "author_username": "a",
+            "text": "댓글", "permalink": "https://www.instagram.com/p/a/", "rule_id": "D3", "reason": "이유",
+            "confidence": "high", "written_at": written, "updated_at": written, "hidden_check": "hidden=true"}
+
+
+class ParallelSheetTests(unittest.TestCase):
+    def test_two_inserts_keep_unique_numbers_and_do_not_use_the_daily_lock(self):
+        sheet = FakeSheets()
+        state = LockState()
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def write(comment_id, written):
+            try:
+                barrier.wait(timeout=3)
+                sync_sheet(sheet, [sheet_record(comment_id, written)], state=state)
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=write, args=pair) for pair in (
+            ("41001", "2026-11-13T01:00:00+00:00"), ("41002", "2026-11-13T02:00:00+00:00"))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        data = sheet.data(HIDE_TAB)
+        self.assertEqual(sorted(row[6] for row in data), ["41001", "41002", "99999"])
+        self.assertEqual(sorted(row[0] for row in data), ["12", "13", "14"])
+        self.assertEqual([row for row in data if row[6] == "99999"], [sheet.original[HIDE_TAB][2]])
+        self.assertIn(SHEET_HIDE_LEASE, state.names)
+        self.assertNotIn("state/lease.json", state.names)
+
+    def test_memo_is_written_to_the_row_found_after_an_insert(self):
+        note = ["안내"] + [""] * 12
+        header = ["번호", "계정/탭", "댓글 작성일(KST)", "작성자", "댓글 원문", "게시물 URL", "댓글 ID",
+                  "원댓글 ID", "규칙 ID", "판정 이유", "확신도", "담당자 결정", "메모"]
+        target = review_row("77", "유지", "2026-11-13 08:00 KST 자동 감지")
+        extra = review_row("76", "", "2026-11-13 08:05 KST 자동 감지")
+        reads = {"n": 0}
+
+        def read(_client, _title):
+            reads["n"] += 1
+            if reads["n"] == 1:
+                return [note, header, target]
+            return [note, header, extra, target]
+
+        class Graph:
+            def hide_comment(self, _comment_id):
+                raise AssertionError("유지는 숨기지 않습니다")
+
+        sheet = FakeSheets()
+        with mock.patch("sns_comment.human_decision._read_rows", side_effect=read):
+            result = apply_human_decisions(sheet, Graph(), now=NOW, hide_enabled=False)
+        self.assertEqual(result["updates"], 1)
+        written = [request["updateCells"]["range"]["startRowIndex"]
+                   for body in sheet.updates for request in body["requests"] if "updateCells" in request]
+        self.assertEqual(written, [3])
+
+    def test_notion_refresh_retries_its_own_lock_and_not_the_daily_lock(self):
+        state = LockState()
+        state.n = 0
+        original = state.lease
+
+        @contextlib.contextmanager
+        def flaky(seconds=3900, name="state/lease.json"):
+            state.n += 1
+            if state.n < 3:
+                raise CloudError("다른 클라우드 실행이 진행 중입니다")
+            with original(seconds, name):
+                yield
+
+        state.lease = flaky
+        waits = []
+        with mock.patch("sns_comment.notion_moderation.open_notion", return_value=("mcp", "reader")):
+            opened = _open_locked(SETTINGS, state, attempts=4, wait_seconds=9, sleeper=waits.append)
+        self.assertEqual(opened, ("mcp", "reader"))
+        self.assertEqual(waits, [9, 9])
+        self.assertIn("state/notion-oauth-lease.json", state.names)
+        self.assertNotIn("state/lease.json", state.names)
+
+    def test_scheduler_invoker_check_does_not_treat_an_empty_policy_as_bound(self):
+        path = Path(__file__).resolve().parents[1] / "scripts" / "token_connection_release.py"
+        sys_path = list(__import__("sys").path)
+        __import__("sys").path.insert(0, str(path.parent))
+        spec = importlib.util.spec_from_file_location("token_connection_release", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        __import__("sys").path[:] = sys_path
+        member = module.SCHEDULER
+        self.assertFalse(module.scheduler_invoker_bound({"bindings": []}, member))
+        self.assertTrue(module.scheduler_invoker_bound(
+            {"bindings": [{"role": "roles/run.invoker", "members": [member]}]}, member))
+        self.assertFalse(module.scheduler_invoker_bound(
+            {"bindings": [{"role": "roles/run.developer", "members": [member]}]}, member))
 
 
 if __name__ == "__main__":

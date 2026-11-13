@@ -451,9 +451,11 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                         sheet_client = open_sheet(config, shared_state)
                     except PilotError as error:
                         log("moderation_sheet_unavailable", account=config["expected_username"], error=str(error))
-                    note = moderate(rows, shared_state, config, moderator, client=client,
-                        account_username=config["expected_username"], region=config.get("region_label"),
-                        sheet_client=sheet_client)
+                    from .cloud_state import MODERATION_LEASE, lease_retry
+                    with lease_retry(shared_state, 180, MODERATION_LEASE, attempts=5, wait_seconds=3):
+                        note = moderate(rows, shared_state, config, moderator, client=client,
+                            account_username=config["expected_username"], region=config.get("region_label"),
+                            sheet_client=sheet_client)
                     log("moderation_daily_recorded", account=config["expected_username"], classified=note["classified"],
                         would_hide=note["would_hide"], human_review=note["human_review"], kept=note["kept"])
                 except (PilotError, OSError, ValueError, KeyError, TypeError) as error:
@@ -554,7 +556,9 @@ def main(argv=None):
             if "SNS_NOTION_MCP_TOKEN" in os.environ:
                 log("notion_mcp_diagnostic_token_ignored")
             auth = cloud_credentials(shared.transport,os.environ["SNS_NOTION_OAUTH_SECRET"])
-            auth.refresh()
+            from .cloud_state import NOTION_OAUTH_LEASE, lease_retry
+            with lease_retry(shared, 60, NOTION_OAUTH_LEASE, attempts=4, wait_seconds=2):
+                auth.refresh()
             log("notion_oauth_refreshed")
             client = McpClient(auth)
             results = []

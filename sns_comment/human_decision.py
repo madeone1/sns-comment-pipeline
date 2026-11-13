@@ -12,7 +12,7 @@ import os
 import re
 
 from .api import GraphError, PilotError
-from .moderation_sheet import REVIEW_COLUMNS, REVIEW_SHEET_ID, REVIEW_TAB, _read_rows, _text
+from .moderation_sheet import REVIEW_COLUMNS, REVIEW_SHEET_ID, REVIEW_TAB, _read_rows, _text, sheet_section
 from .sheets import cell
 
 
@@ -110,19 +110,20 @@ def find_comment_row(rows, comment_id):
     return None
 
 
-def set_decision_if_blank(client, comment_id, decision):
-    """Write 담당자 결정 only when that cell is empty. An existing choice is never replaced."""
+def set_decision_if_blank(client, comment_id, decision, state=None):
+    """Write 담당자 결정 only when that cell is empty. The row is found again inside the lock."""
     if decision not in {"숨김", "유지"}:
         return {"result": "skip", "sheet_decision": ""}
-    rows = _read_rows(client, REVIEW_TAB)
-    index = find_comment_row(rows, comment_id)
-    if index is None:
-        return {"result": "missing", "sheet_decision": ""}
-    current = _text(rows[index][DECISION_COLUMN]) if len(rows[index]) > DECISION_COLUMN else ""
-    if current:
-        return {"result": "same" if current == decision else "conflict", "sheet_decision": current}
-    client.request(":batchUpdate", body={"requests": [_cell(REVIEW_SHEET_ID, index, DECISION_COLUMN, decision)]})
-    return {"result": "written", "sheet_decision": decision}
+    with sheet_section(state, REVIEW_TAB):
+        rows = _read_rows(client, REVIEW_TAB)
+        index = find_comment_row(rows, comment_id)
+        if index is None:
+            return {"result": "missing", "sheet_decision": ""}
+        current = _text(rows[index][DECISION_COLUMN]) if len(rows[index]) > DECISION_COLUMN else ""
+        if current:
+            return {"result": "same" if current == decision else "conflict", "sheet_decision": current}
+        client.request(":batchUpdate", body={"requests": [_cell(REVIEW_SHEET_ID, index, DECISION_COLUMN, decision)]})
+        return {"result": "written", "sheet_decision": decision}
 
 
 def _cell(sheet_id, row_index, column, value):
@@ -147,7 +148,24 @@ def _failure_memo(now, memo, reason, permanent):
     return _stamp(now) + " KST 숨김 실패 (" + str(count) + "/" + str(MAX_ATTEMPTS) + "): " + reason
 
 
-def apply_human_decisions(client, graph, now=None, hide_enabled=None):
+def _write_memos(client, updates, state):
+    """Find each comment ID again immediately before writing. Do not reuse an earlier index."""
+    if not updates:
+        return 0
+    with sheet_section(state, REVIEW_TAB):
+        fresh = _read_rows(client, REVIEW_TAB)
+        requests = []
+        for comment_id, memo in updates:
+            index = find_comment_row(fresh, comment_id)
+            if index is None:
+                continue
+            requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, memo))
+        if requests:
+            client.request(":batchUpdate", body={"requests": requests})
+        return len(requests)
+
+
+def apply_human_decisions(client, graph, now=None, hide_enabled=None, state=None):
     """Scan 사람 판단. Blank decisions and already finished manual rows are skipped."""
     if hide_enabled is None:
         hide_enabled = human_hide_enabled()
@@ -166,8 +184,7 @@ def apply_human_decisions(client, graph, now=None, hide_enabled=None):
         comment_id = _text(row[COMMENT_COLUMN]) if len(row) > COMMENT_COLUMN else ""
         if not _actionable(decision, memo):
             continue
-        index = find_comment_row(rows, comment_id)
-        if index is None or not re.fullmatch(r"[0-9]{1,30}", comment_id) or comment_id in hidden_ids:
+        if find_comment_row(rows, comment_id) is None or not re.fullmatch(r"[0-9]{1,30}", comment_id) or comment_id in hidden_ids:
             plans.append({"comment_id": comment_id, "decision": decision, "action": "skip"})
             continue
         if decision == "유지":
@@ -198,12 +215,4 @@ def apply_human_decisions(client, graph, now=None, hide_enabled=None):
         hidden_ids.add(comment_id)
         plans.append({"comment_id": comment_id, "decision": decision, "action": "hidden"})
         _log("human_decision", comment_id=comment_id, decision=decision, action="hidden")
-    requests = []
-    for comment_id, memo in updates:
-        index = find_comment_row(rows, comment_id)
-        if index is None:
-            continue
-        requests.append(_cell(REVIEW_SHEET_ID, index, MEMO_COLUMN, memo))
-    if requests:
-        client.request(":batchUpdate", body={"requests": requests})
-    return {"plans": plans, "updates": len(requests)}
+    return {"plans": plans, "updates": _write_memos(client, updates, state)}

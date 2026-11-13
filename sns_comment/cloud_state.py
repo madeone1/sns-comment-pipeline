@@ -1,4 +1,21 @@
-"""Cloud Storage state and generation-guarded lease for a single scheduled writer."""
+"""Cloud Storage state and one lock file per writer.
+
+state/lease.json is only the daily collection and recover lock. It covers
+runs/*, state/comments.sqlite3, state/reports.json, pipeline/*, the connection
+registry, and daily-merge/*. The moderation job does not take it.
+
+state/moderation-lease.json covers moderation/decisions/*, moderation/repeat-index/*,
+moderation/daily/*, and moderation/sheet-pending.json. The morning job takes this
+lock only while it classifies, so it cannot write those objects at the same time
+as the 10-minute job. Every write also sends the GCS generation it read.
+
+state/notion-moderation-lease.json covers moderation/notion-decision-database.json
+and the daily comment toggle. state/notion-summary-lease.json stops two summary
+runs. state/notion-oauth-lease.json covers only the Notion refresh-token write.
+
+state/sheet-hide-lease.json and state/sheet-review-lease.json cover one rulebook
+tab each. Numbering and the insert happen inside that lock, then the lock is released.
+"""
 
 import contextlib
 import datetime as dt
@@ -6,6 +23,7 @@ import json
 import re
 from pathlib import Path
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -13,6 +31,15 @@ import urllib.request
 import uuid
 
 from .api import NoRedirect, PilotError, https_context
+
+
+DAILY_LEASE = "state/lease.json"
+MODERATION_LEASE = "state/moderation-lease.json"
+NOTION_MODERATION_LEASE = "state/notion-moderation-lease.json"
+NOTION_SUMMARY_LEASE = "state/notion-summary-lease.json"
+NOTION_OAUTH_LEASE = "state/notion-oauth-lease.json"
+SHEET_HIDE_LEASE = "state/sheet-hide-lease.json"
+SHEET_REVIEW_LEASE = "state/sheet-review-lease.json"
 
 
 class CloudError(PilotError):
@@ -159,3 +186,30 @@ class CloudState:
             return self.put("state/comments.sqlite3", target.read_bytes(), generation)
         finally:
             target.unlink(missing_ok=True)
+
+
+def _lock_busy(error):
+    text = str(error)
+    return "진행 중" in text or "잠금" in text
+
+
+@contextlib.contextmanager
+def lease_retry(state, seconds=3900, name=DAILY_LEASE, attempts=4, wait_seconds=5, sleeper=time.sleep):
+    """Take a named lock. A busy lock is retried; an error inside the lock is not."""
+    last = None
+    for attempt in range(max(1, int(attempts))):
+        manager = state.lease(seconds, name)
+        try:
+            manager.__enter__()
+        except CloudError as error:
+            if not _lock_busy(error) or attempt + 1 >= attempts:
+                raise
+            last = error
+            sleeper(wait_seconds)
+            continue
+        try:
+            yield
+        finally:
+            manager.__exit__(*sys.exc_info())
+        return
+    raise last

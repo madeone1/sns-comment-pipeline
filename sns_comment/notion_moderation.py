@@ -215,18 +215,24 @@ def _finish_async(mcp, result, sleeper):
 
 
 def ensure_database(mcp, state, settings, sleeper=time.sleep):
-    current, generation = state.json_get(STATE_NAME)
-    if isinstance(current, dict) and current.get("url") and current.get("data_source_url"):
-        return current
-    parent = parent_page_id(settings)
-    found = find_database_on_page(mcp.call("fetch", {"id": parent}))
-    created = found or parse_database(_finish_async(mcp, mcp.call("create-database", {
-        "parent": {"type": "page_id", "page_id": parent},
-        "title": DATABASE_TITLE,
-        "schema": SCHEMA,
-    }), sleeper))
-    state.json_put(STATE_NAME, created, generation=generation)
-    return created
+    from .cloud_state import NOTION_MODERATION_LEASE, lease_retry
+    def create():
+        current, generation = state.json_get(STATE_NAME)
+        if isinstance(current, dict) and current.get("url") and current.get("data_source_url"):
+            return current
+        parent = parent_page_id(settings)
+        found = find_database_on_page(mcp.call("fetch", {"id": parent}))
+        created = found or parse_database(_finish_async(mcp, mcp.call("create-database", {
+            "parent": {"type": "page_id", "page_id": parent},
+            "title": DATABASE_TITLE,
+            "schema": SCHEMA,
+        }), sleeper))
+        state.json_put(STATE_NAME, created, generation=generation)
+        return created
+    if not hasattr(state, "lease"):
+        return create()
+    with lease_retry(state, 120, NOTION_MODERATION_LEASE, attempts=4, wait_seconds=2, sleeper=sleeper):
+        return create()
 
 
 def _source_id(database):
@@ -303,7 +309,7 @@ def add_pending(mcp, database, items, known=None):
     return fresh
 
 
-def pull_decisions(sheet, mcp, database):
+def pull_decisions(sheet, mcp, database, state=None):
     """Copy a Notion choice into an empty sheet cell. Never replace a sheet choice."""
     outcomes = []
     for row in _query(mcp, database, '"결정" = ? OR "결정" = ?', ["숨김", "유지"]):
@@ -312,7 +318,7 @@ def pull_decisions(sheet, mcp, database):
         if row["status"].startswith("시트와 다름"):
             outcomes.append({"comment_id": row["comment_id"], "result": "conflict"})
             continue
-        outcome = set_decision_if_blank(sheet, row["comment_id"], row["decision"])
+        outcome = set_decision_if_blank(sheet, row["comment_id"], row["decision"], state=state)
         outcomes.append({"comment_id": row["comment_id"], **outcome})
         if outcome["result"] == "missing" and row["status"] != "시트에서 댓글을 찾지 못함":
             _set_status(mcp, row["url"], "시트에서 댓글을 찾지 못함")
@@ -405,20 +411,17 @@ def publish_daily_summary(settings, state, sheet, mcp, finder, now=None, attempt
             "pending": len(pending), "added": len(added), "database": database}
 
 
-def _open_locked(settings, state):
-    """Refresh Notion under the daily job's lock so the two jobs cannot rotate the token together."""
-    from .cloud_state import CloudError
-    lease = getattr(state, "lease", None)
-    if lease is None:
+def _open_locked(settings, state, attempts=4, wait_seconds=15, sleeper=time.sleep):
+    """Refresh Notion on its own lock. A busy lock is retried and does not wait on daily recover."""
+    from .cloud_state import NOTION_OAUTH_LEASE, CloudError, lease_retry
+    if not hasattr(state, "lease"):
         return open_notion(settings, state)
     try:
-        with lease(180, "state/lease.json"):
+        with lease_retry(state, 60, NOTION_OAUTH_LEASE, attempts=attempts, wait_seconds=wait_seconds, sleeper=sleeper):
             return open_notion(settings, state)
     except CloudError as error:
-        if "진행" in str(error) or "잠금" in str(error):
-            _log("notion_decision_deferred", reason=str(error))
-            return None
-        raise
+        _log("notion_decision_deferred", reason=str(error), attempts=attempts)
+        return None
 
 
 def open_notion(settings, state):
@@ -446,7 +449,7 @@ def prepare_notion_decisions(settings, state, sheet):
             return None
         mcp, _reader = opened
         database = ensure_database(mcp, state, settings)
-        pulled = pull_decisions(sheet, mcp, database)
+        pulled = pull_decisions(sheet, mcp, database, state=state)
         return {"mcp": mcp, "database": database, "pulled": pulled}
     except PilotError as error:
         _log("notion_decision_unavailable", error=str(error))
