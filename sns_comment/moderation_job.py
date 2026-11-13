@@ -240,7 +240,7 @@ def run(settings, state, project, now=None):
                 log("notion_decision_unavailable", error=str(error))
             try:
                 from .human_decision import apply_human_decisions
-                decisions = apply_human_decisions(sheet, client)
+                decisions = apply_human_decisions(sheet, client, state=state)
                 log("human_decision_scan", updates=decisions["updates"], planned=len(decisions["plans"]))
             except PilotError as error:
                 log("human_decision_failed", error=str(error))
@@ -261,11 +261,11 @@ def main(argv=None):
     try:
         settings = read_settings(args.config)
         if args.notion_summary:
-            from .cloud_state import CloudError
+            from .cloud_state import NOTION_SUMMARY_LEASE, CloudError, lease_retry
             from .notion_moderation import run_notion_summary
             state = CloudState(os.environ["SNS_STATE_BUCKET"])
             try:
-                with state.lease(1800, "state/notion-summary-lease.json"):
+                with lease_retry(state, 1800, NOTION_SUMMARY_LEASE, attempts=4, wait_seconds=15):
                     result = run_notion_summary(settings, state)
             except CloudError as error:
                 if "진행 중" in str(error) or "잠금" in str(error):
@@ -275,6 +275,8 @@ def main(argv=None):
             except PilotError as error:
                 log("notion_summary_failed", error=str(error))
                 return 1
+            if result.get("status") == "deferred":
+                log("notion_summary_deferred", reason="노션 잠금을 여러 번 시도한 뒤에도 열지 못했습니다.")
             log("notion_summary_finished", status=result["status"], day=result.get("day"))
             return 1 if result.get("status") == "failed" else 0
         if args.backfill_sheet:
@@ -284,7 +286,8 @@ def main(argv=None):
                 log("moderation_sheet_unavailable", error="기준표 시트를 열 수 없습니다.")
                 return 1
             try:
-                with state.lease(540, "state/moderation-lease.json"):
+                from .cloud_state import MODERATION_LEASE
+                with state.lease(540, MODERATION_LEASE):
                     result = backfill_sheet(state, sheet)
                 log("moderation_sheet_backfill", **result)
                 return 0
@@ -302,7 +305,8 @@ def main(argv=None):
         project = os.environ["GOOGLE_CLOUD_PROJECT"]
         state = CloudState(os.environ["SNS_STATE_BUCKET"])
         try:
-            with state.lease(540, "state/moderation-lease.json"):
+            from .cloud_state import MODERATION_LEASE
+            with state.lease(540, MODERATION_LEASE):
                 result = run(settings, state, project)
         except CloudError as error:
             if "진행 중" in str(error) or "잠금" in str(error):

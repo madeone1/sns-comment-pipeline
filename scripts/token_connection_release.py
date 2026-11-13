@@ -73,6 +73,36 @@ def verify(day,page):
         gcloud(['run','jobs','delete',job,'--region='+REGION],optional=True)
 
 
+SCHEDULER = 'serviceAccount:sns-scheduler@' + PROJECT + '.iam.gserviceaccount.com'
+INVOKER_JOBS = ('sns-comments-daily', 'sns-comments-moderate', 'sns-comments-notion-summary')
+
+
+def scheduler_invoker_bound(policy, member=SCHEDULER):
+    """True when the scheduler identity already has roles/run.invoker. Does not replace the policy."""
+    for binding in (policy or {}).get('bindings') or []:
+        if binding.get('role') == 'roles/run.invoker' and member in (binding.get('members') or []):
+            return True
+    return False
+
+
+def ensure_scheduler_invoker(job):
+    """Restore a missing invoker binding. Never call set-iam-policy; that would wipe other members."""
+    described = gcloud(['run', 'jobs', 'describe', job, '--region=' + REGION, '--format=value(metadata.name)'], optional=True)
+    if described.returncode:
+        return False
+    policy = json.loads(gcloud(['run', 'jobs', 'get-iam-policy', job, '--region=' + REGION, '--format=json']).stdout or '{}')
+    if scheduler_invoker_bound(policy):
+        print(json.dumps({'job': job, 'scheduler_invoker': True}))
+        return True
+    gcloud(['run', 'jobs', 'add-iam-policy-binding', job, '--region=' + REGION,
+            '--member=' + SCHEDULER, '--role=roles/run.invoker'])
+    checked = json.loads(gcloud(['run', 'jobs', 'get-iam-policy', job, '--region=' + REGION, '--format=json']).stdout or '{}')
+    if not scheduler_invoker_bound(checked):
+        raise SystemExit(job + ' 작업에 스케줄러 실행 권한이 없습니다.')
+    print(json.dumps({'job': job, 'scheduler_invoker': True, 'binding_restored': True}))
+    return True
+
+
 def deploy():
     image=json.loads((RELEASE/'release.json').read_text(encoding="utf-8"))['image']
     build_id=json.loads((RELEASE/'build.json').read_text(encoding="utf-8"))['id']
@@ -90,6 +120,17 @@ def deploy():
     expected['containers'][0]['env']=[e for e in expected['containers'][0].get('env',[]) if e['name']!='SNS_IG_ACCESS_TOKEN']
     assert expected==after['spec']['template']['spec']['template']['spec']
     save('job-after',after);print(json.dumps({'deployed':True,'image':image,'only_planned_changes':True}))
+    # Image only. Do not pass --set-env-vars: that replaces SNS_MODERATION_HIDE and the other flags.
+    # This repo never calls set-iam-policy. A missing scheduler binding is added back, not rewritten.
+    for job in ('sns-comments-moderate', 'sns-comments-notion-summary'):
+        described = gcloud(['run', 'jobs', 'describe', job, '--region=' + REGION, '--format=value(metadata.name)'], optional=True)
+        if described.returncode:
+            print(json.dumps({'job': job, 'image_update': 'absent'}))
+            continue
+        gcloud(['run', 'jobs', 'update', job, '--region=' + REGION, '--image=' + image])
+        print(json.dumps({'job': job, 'image': image, 'env_unchanged': True}))
+    for job in INVOKER_JOBS:
+        ensure_scheduler_invoker(job)
 
 
 if __name__=='__main__':

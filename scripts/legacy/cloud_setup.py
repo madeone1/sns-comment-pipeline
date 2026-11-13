@@ -131,6 +131,8 @@ def deploy_job():
          "--tasks=1","--parallelism=1","--max-retries=0","--task-timeout=3600s","--cpu=1","--memory=512Mi",
          "--set-env-vars=GOOGLE_CLOUD_PROJECT="+PROJECT+",SNS_STATE_BUCKET="+PROJECT+"-state,SNS_NOTION_OAUTH_SECRET=projects/"+PROJECT+"/secrets/sns-notion-oauth",
          "--set-secrets=SNS_IG_ACCESS_TOKEN=sns-meta-token:latest"])
+    # add-iam-policy-binding adds one member. It does not replace the job IAM policy.
+    # run jobs update does not clear IAM either. Do not switch this to set-iam-policy.
     if action == "create":
         run(["run","jobs","add-iam-policy-binding",JOB,"--region="+REGION,"--member=serviceAccount:"+SCHEDULER,"--role=roles/run.invoker"])
     print(json.dumps({"status":"cloud_job_ready","project":PROJECT,"job":JOB,"scheduler_created":False}))

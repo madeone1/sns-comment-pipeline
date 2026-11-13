@@ -1,7 +1,9 @@
+import contextlib
 import unittest
 from unittest import mock
 
-from sns_comment.cloud_state import CloudError, CloudState
+from sns_comment.api import PilotError
+from sns_comment.cloud_state import CloudError, CloudState, lease_retry
 
 
 class CloudStateTests(unittest.TestCase):
@@ -36,6 +38,41 @@ class CloudStateTests(unittest.TestCase):
         state=CloudState("private",transport)
         self.assertEqual(state.get("state/comments.sqlite3"),(b"raw checkpoint",11))
         self.assertIn("generation=11",transport.request.call_args.args[1])
+
+
+class LeaseRetryTests(unittest.TestCase):
+    def test_a_busy_lock_is_retried_and_then_entered(self):
+        calls = {"n": 0}
+        waits = []
+
+        class State:
+            @contextlib.contextmanager
+            def lease(self, seconds=3900, name="state/lease.json"):
+                calls["n"] += 1
+                calls["name"] = name
+                if calls["n"] < 3:
+                    raise CloudError("다른 클라우드 실행이 진행 중입니다")
+                yield
+
+        with lease_retry(State(), 10, "state/notion-oauth-lease.json", attempts=4, wait_seconds=15, sleeper=waits.append):
+            calls["entered"] = True
+        self.assertTrue(calls["entered"])
+        self.assertEqual(calls["name"], "state/notion-oauth-lease.json")
+        self.assertEqual(waits, [15, 15])
+
+    def test_an_error_inside_the_lock_is_not_retried(self):
+        calls = {"n": 0}
+
+        class State:
+            @contextlib.contextmanager
+            def lease(self, seconds=3900, name="state/lease.json"):
+                calls["n"] += 1
+                yield
+
+        with self.assertRaises(PilotError):
+            with lease_retry(State(), attempts=4, sleeper=lambda _seconds: None):
+                raise PilotError("안쪽 실패")
+        self.assertEqual(calls["n"], 1)
 
 
 if __name__=="__main__":unittest.main()

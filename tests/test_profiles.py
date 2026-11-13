@@ -375,7 +375,7 @@ class ProfileTests(unittest.TestCase):
                 mock.patch.object(cloud, "Analyzer"), mock.patch.object(cloud, "execute", return_value={"status":"complete"}) as execute, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cloud.main(["--config", str(self.path), "--account", BUSAN]), 0)
-        states[0].lease.assert_called_once()
+        self.assertEqual(states[0].lease.call_args_list, [mock.call(), mock.call(60, "state/notion-oauth-lease.json")])
         states[1].lease.assert_not_called()
         self.assertEqual(factory.call_args.kwargs["prefix"], "accounts/" + BUSAN)
         oauth.assert_called_once_with(states[0].transport, "existing-oauth")
@@ -420,7 +420,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual([state for _,state,_ in seen],states)
                 self.assertEqual(len({instant for _,_,instant in seen}),1)
                 oauth.return_value.refresh.assert_called_once();mcp.assert_called_once()
-                states[0].lease.assert_called_once()
+                self.assertEqual(states[0].lease.call_args_list, [mock.call(), mock.call(60, "state/notion-oauth-lease.json")])
                 for state in states[1:]:state.lease.assert_not_called()
                 summary=states[0].json_put.call_args.args[1]
                 self.assertEqual([r["status"] for r in summary["accounts"]],["failed" if fail else "complete","complete","complete"])

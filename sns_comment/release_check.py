@@ -13,7 +13,7 @@ import re
 
 from sns_comment import token_connections as core,workflow
 from sns_comment.api import GraphClient,PilotError,page_data
-from sns_comment.cloud_state import CloudState
+from sns_comment.cloud_state import DAILY_LEASE, CloudState, lease_retry
 from sns_comment.collector import Collector
 from sns_comment.connection_registry import REGISTRY_OBJECT,runtime_configs
 from sns_comment.google_access import access_token
@@ -121,7 +121,7 @@ def main():
     stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ');proof='verification/token-connections/'+stamp
 
 
-    with shared.lease():
+    with lease_retry(shared, 3900, DAILY_LEASE, attempts=4, wait_seconds=15):
         before,generation=shared.json_get(REGISTRY_OBJECT)
         registry,plan=core.reconcile(settings,shared,apply=False)
         configs=runtime_configs(settings,registry)
