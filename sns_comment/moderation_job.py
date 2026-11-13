@@ -257,9 +257,21 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--backfill-sheet", action="store_true", help="저장된 판단을 기준표 시트에 이어서 붙입니다.")
     parser.add_argument("--notion-summary", action="store_true", help="오늘 일일 업무에 댓글 관리 토글을 붙입니다.")
+    parser.add_argument("--sort-sheet", action="store_true", help="기준표 데이터 행을 댓글 작성일 내림차순으로 정렬합니다. 기본은 미리보기입니다.")
+    parser.add_argument("--apply", action="store_true", help="--sort-sheet 와 함께 쓰면 정렬을 시트에 반영합니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if args.sort_sheet:
+            from .moderation_sheet import sort_tabs
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            sheet = open_sheet(settings, state)
+            if sheet is None:
+                log("moderation_sheet_unavailable", error="기준표 시트를 열 수 없습니다.")
+                return 1
+            result = sort_tabs(sheet, state, apply=args.apply)
+            log("sheet_sort", apply=args.apply, tabs=result)
+            return 0
         if args.notion_summary:
             from .cloud_state import NOTION_SUMMARY_LEASE, CloudError, lease_retry
             from .notion_moderation import run_notion_summary

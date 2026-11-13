@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -394,6 +395,12 @@ class FakeSheets:
                 if "insertDimension" in request:
                     self._insert_rows(request["insertDimension"])
                     continue
+                if "copyPaste" in request:
+                    self._copy_row(request["copyPaste"])
+                    continue
+                if "deleteDimension" in request:
+                    self._delete_rows(request["deleteDimension"])
+                    continue
                 self.assert_no_structural_edit(request)
                 update = request["updateCells"]
                 title = next(name for name, tab in self.tabs.items() if tab["id"] == update["range"]["sheetId"])
@@ -420,13 +427,44 @@ class FakeSheets:
 
     def _insert_rows(self, insert):
         span = insert["range"]
-        if span.get("dimension") != "ROWS" or span.get("startIndex") != 2 or insert.get("inheritFromBefore") is not False:
-            raise AssertionError("new rows must be inserted under the header with data-row formatting")
+        start = span.get("startIndex")
+        if span.get("dimension") != "ROWS" or start < 2:
+            raise AssertionError("new rows must stay below the header")
+        if start == 2 and insert.get("inheritFromBefore") is not False:
+            raise AssertionError("the top insert must copy the data row, not the header")
+        if start > 2 and insert.get("inheritFromBefore") is not True:
+            raise AssertionError("an insert below the top copies the data row above it")
         title = next(name for name, tab in self.tabs.items() if tab["id"] == span["sheetId"])
         tab = self.tabs[title]
         width = max((len(row) for row in tab["rows"]), default=13)
         for _ in range(span["endIndex"] - span["startIndex"]):
             tab["rows"].insert(span["startIndex"], [""] * width)
+
+    def _copy_row(self, paste):
+        if paste.get("pasteType") != "PASTE_NORMAL":
+            raise AssertionError("a moved row must keep values, formatting, and validation")
+        source, dest = paste["source"], paste["destination"]
+        if source["sheetId"] != dest["sheetId"] or source["startRowIndex"] < 2 or dest["startRowIndex"] < 2:
+            raise AssertionError("only data rows can be copied")
+        title = next(name for name, tab in self.tabs.items() if tab["id"] == source["sheetId"])
+        tab = self.tabs[title]
+        copied = [list(tab["rows"][index]) for index in range(source["startRowIndex"], source["endRowIndex"])]
+        start_col, end_col = source["startColumnIndex"], source["endColumnIndex"]
+        for offset, values in enumerate(copied):
+            row = tab["rows"][dest["startRowIndex"] + offset]
+            if len(row) < end_col:
+                row.extend([""] * (end_col - len(row)))
+            chunk = values[start_col:end_col]
+            if len(chunk) < end_col - start_col:
+                chunk.extend([""] * (end_col - start_col - len(chunk)))
+            row[start_col:end_col] = chunk
+
+    def _delete_rows(self, delete):
+        span = delete["range"]
+        if span.get("dimension") != "ROWS" or span.get("startIndex") < 2:
+            raise AssertionError("the note and header cannot be deleted")
+        title = next(name for name, tab in self.tabs.items() if tab["id"] == span["sheetId"])
+        del self.tabs[title]["rows"][span["startIndex"]:span["endIndex"]]
 
     def assert_no_structural_edit(self, request):
         if "addSheet" in request or "deleteSheet" in request:
@@ -602,6 +640,161 @@ class SheetLogTests(unittest.TestCase):
         inserted = [request for body in sheet.updates for request in body["requests"] if "insertDimension" in request]
         self.assertEqual(inserted[0]["insertDimension"]["range"]["startIndex"], 2)
         self.assertIs(inserted[0]["insertDimension"]["inheritFromBefore"], False)
+
+    def test_an_older_comment_is_inserted_below_newer_rows_and_a_blank_time_goes_last(self):
+        from sns_comment.moderation_sheet import sync_sheet
+        sheet = FakeSheets()
+        older = {"status": "hidden", "comment_id": "30070", "region": "서울", "author_username": "a",
+                 "text": "오래됨", "permalink": "https://www.instagram.com/p/a/", "rule_id": "D3",
+                 "reason": "옛", "confidence": "high", "written_at": "2026-10-01T00:00:00+00:00",
+                 "updated_at": "2026-11-13T00:00:00+00:00", "hidden_check": "hidden=true"}
+        blank = {**older, "comment_id": "30071", "written_at": "", "text": "시각 없음"}
+        sync_sheet(sheet, [older, blank])
+        data = sheet.data(HIDE_TAB)
+        self.assertEqual([row[6] for row in data], ["99999", "30070", "30071"])
+        self.assertEqual(data[0][0], "12")
+        self.assertEqual([row[0] for row in data[1:]], ["14", "13"])
+        self.assertEqual(data[2][2], "")
+        inserted = [request["insertDimension"] for body in sheet.updates for request in body["requests"]
+                    if "insertDimension" in request]
+        self.assertGreater(inserted[0]["range"]["startIndex"], 2)
+        self.assertIs(inserted[0]["inheritFromBefore"], True)
+
+    def test_sort_moves_whole_rows_by_comment_time_and_keeps_numbers(self):
+        from sns_comment.human_decision import find_comment_row, set_decision_if_blank
+        from sns_comment.moderation_sheet import sort_plan, sort_requests
+        header = list(HIDE_COLUMNS)
+        old = ["12", "서울 댓글", "2026-11-01 09:00", "old", "기존", "https://www.instagram.com/p/old/",
+               "111", "", "K1", "기존", "높음", "숨김 완료", "메모"]
+        new = ["4", "부산 댓글", "2026-11-13 09:00", "new", "최근", "https://www.instagram.com/p/new/",
+               "222", "", "D3", "최근", "높음", "숨김 완료", "유지 메모"]
+        blank = ["9", "속초 댓글", "", "none", "시각없음", "https://www.instagram.com/p/blank/",
+                 "333", "", "D1", "없음", "낮음", "", "사람 메모"]
+        rows = [["안내"], header, old, new, blank]
+        plan = sort_plan(rows)
+        self.assertEqual([item["comment_id"] for item in plan["moves"]], ["222", "111"])
+        self.assertEqual([item["number"] for item in plan["moves"]], ["4", "12"])
+        requests = sort_requests(HIDE_SHEET_ID, rows)
+        self.assertEqual(requests[0]["insertDimension"]["range"]["startIndex"], 2)
+        self.assertEqual(requests[-1]["deleteDimension"]["range"]["startIndex"], 5)
+        self.assertGreaterEqual(requests[-1]["deleteDimension"]["range"]["startIndex"], 2)
+        ordered = rows[:2] + [row for _index, row in plan["ordered"]]
+        self.assertEqual([row[6] for row in ordered[2:]], ["222", "111", "333"])
+        self.assertEqual([row[0] for row in ordered[2:]], ["4", "12", "9"])
+        self.assertEqual(find_comment_row(ordered, "222"), 2)
+        sheet = FakeSheets()
+        sheet.tabs[HIDE_TAB]["rows"] = [list(row) for row in ordered]
+        # The decision column on the hide tab is not used; the review lookup is what must survive a move.
+        review = FakeSheets()
+        review.tabs[REVIEW_TAB]["rows"] = [["안내"], list(REVIEW_COLUMNS),
+                                            ["4", "부산 댓글", "2026-11-13 09:00", "new", "최근", "https://www.instagram.com/p/new/",
+                                             "222", "", "D3", "최근", "높음", "", "2026-11-13 09:00 KST 자동 감지"],
+                                            ["12", "서울 댓글", "2026-11-01 09:00", "old", "기존", "https://www.instagram.com/p/old/",
+                                             "111", "", "K1", "기존", "높음", "유지", "사람이 적은 행"]]
+        moved = sort_plan(review.tabs[REVIEW_TAB]["rows"])
+        review.tabs[REVIEW_TAB]["rows"] = review.tabs[REVIEW_TAB]["rows"][:2] + [row for _index, row in moved["ordered"]]
+        result = set_decision_if_blank(review, "222", "숨김")
+        self.assertEqual(result["result"], "written")
+        self.assertEqual(review.data(REVIEW_TAB)[0][6], "222")
+        self.assertEqual(review.data(REVIEW_TAB)[0][11], "숨김")
+        self.assertEqual(review.data(REVIEW_TAB)[1][11], "유지")
+
+    def test_blank_times_follow_dated_rows_and_equal_times_keep_the_older_row(self):
+        from sns_comment.moderation_sheet import _insertion_index, sort_plan
+        dated = ["1", "서울 댓글", "2026-11-13 09:00", "", "", "", "aaa"]
+        same = ["2", "서울 댓글", "2026-11-13 09:00", "", "", "", "bbb"]
+        older = ["3", "서울 댓글", "2026-10-01 09:00", "", "", "", "ccc"]
+        blank = ["4", "서울 댓글", "", "", "", "", "ddd"]
+        rows = [["안내"], list(HIDE_COLUMNS), dated, same, older, blank]
+        self.assertEqual(_insertion_index(rows, "2026-11-13 09:00"), 4)
+        self.assertEqual(_insertion_index(rows, ""), 5)
+        self.assertEqual([row[6] for _index, row in sort_plan(rows)["ordered"]], ["aaa", "bbb", "ccc", "ddd"])
+        serial = ["5", "서울 댓글", 46339.375, "", "", "", "eee"]
+        mixed = [["안내"], list(HIDE_COLUMNS), ["6", "서울 댓글", "2026-11-01 09:00", "", "", "", "fff"], serial]
+        self.assertEqual([row[6] for _index, row in sort_plan(mixed)["ordered"]], ["eee", "fff"])
+
+    def test_sort_apply_moves_manual_rows_without_rewriting_them_and_holds_the_tab_lock(self):
+        from sns_comment.cloud_state import SHEET_HIDE_LEASE, SHEET_REVIEW_LEASE
+        from sns_comment.human_decision import find_comment_row
+        from sns_comment.moderation_sheet import sort_tabs
+        sheet = FakeSheets()
+        old = ["12", "서울 댓글", "2026-11-01 09:00", "old", "기존", "https://www.instagram.com/p/old/",
+               "111", "", "K1", "기존", "높음", "숨김 완료", "숨김 메모"]
+        newer = ["4", "부산 댓글", "2026-11-13 09:00", "new", "최근", "https://www.instagram.com/p/new/",
+                 "222", "", "D3", "최근", "높음", "숨김 완료", "최근 메모"]
+        blank = ["9", "속초 댓글", "", "none", "시각없음", "https://www.instagram.com/p/blank/",
+                 "333", "", "D1", "없음", "낮음", "", "빈 시각"]
+        kept = ["37", "서울 댓글", "2026-07-05 12:23", "fan", "예전 수동", "https://www.instagram.com/p/x/",
+                "manual", "", "H1", "애매", "보통", "유지", "사람이 적은 행"]
+        pending = ["80", "토론토 댓글", "2026-11-12 18:00", "fan2", "대기", "https://www.instagram.com/p/y/",
+                   "pending", "", "H2", "애매", "보통", "숨김", "2026-11-12 18:00 KST 자동 감지"]
+        sheet.tabs[HIDE_TAB]["rows"] = [["안내문"], list(HIDE_COLUMNS), old, newer, blank]
+        sheet.tabs[REVIEW_TAB]["rows"] = [["안내문"], list(REVIEW_COLUMNS), kept, pending]
+        state = _NameLock()
+        preview = sort_tabs(sheet, state, apply=False)
+        self.assertEqual(sheet.updates, [])
+        self.assertEqual(state.names, [SHEET_HIDE_LEASE, SHEET_REVIEW_LEASE])
+        self.assertTrue(all(item["applied"] is False and item["moves"] > 0 for item in preview))
+        applied = sort_tabs(sheet, state, apply=True)
+        self.assertTrue(all(item["applied"] for item in applied))
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][0], ["안내문"])
+        self.assertEqual(sheet.tabs[HIDE_TAB]["rows"][1], list(HIDE_COLUMNS))
+        self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][0], ["안내문"])
+        self.assertEqual(sheet.tabs[REVIEW_TAB]["rows"][1], list(REVIEW_COLUMNS))
+        self.assertEqual([row[6] for row in sheet.data(HIDE_TAB)], ["222", "111", "333"])
+        self.assertEqual([row[0] for row in sheet.data(HIDE_TAB)], ["4", "12", "9"])
+        self.assertEqual(sheet.data(HIDE_TAB)[0][12], "최근 메모")
+        self.assertEqual([row[6] for row in sheet.data(REVIEW_TAB)], ["pending", "manual"])
+        self.assertEqual(sheet.data(REVIEW_TAB)[0][11], "숨김")
+        self.assertEqual(sheet.data(REVIEW_TAB)[1][11], "유지")
+        self.assertEqual(sheet.data(REVIEW_TAB)[1][12], "사람이 적은 행")
+        self.assertEqual(find_comment_row(sheet.tabs[REVIEW_TAB]["rows"], "manual"), 3)
+        self.assertEqual([row[0] for row in sheet.data(REVIEW_TAB)], ["80", "37"])
+        again = sort_tabs(sheet, state, apply=True)
+        self.assertTrue(all(item["applied"] is False for item in again))
+        self.assertNotIn("state/lease.json", state.names)
+
+    def test_sort_command_is_a_preview_until_apply(self):
+        from sns_comment.moderation_job import main
+        sheet = FakeSheets()
+        sheet.tabs[HIDE_TAB]["rows"][2] = ["12", "서울 댓글", "2026-10-01 09:00", "old", "기존",
+                                            "https://www.instagram.com/p/old/", "99999", "", "K1", "기존", "높음",
+                                            "숨김 완료", "사람이 적은 행"]
+        sheet.tabs[HIDE_TAB]["rows"].append(
+            ["4", "부산 댓글", "2026-11-13 09:00", "new", "최근", "https://www.instagram.com/p/new/",
+             "222", "", "D3", "최근", "높음", "숨김 완료", "최근 메모"])
+        with mock.patch.dict(os.environ, {"SNS_STATE_BUCKET": "bucket"}), \
+             mock.patch("sns_comment.moderation_job.CloudState", return_value=_NameLock()), \
+             mock.patch("sns_comment.moderation_job.open_sheet", return_value=sheet):
+            self.assertEqual(main(["--sort-sheet"]), 0)
+            self.assertEqual(sheet.updates, [])
+            self.assertEqual(main(["--sort-sheet", "--apply"]), 0)
+        self.assertEqual(sheet.data(HIDE_TAB)[0][6], "222")
+        self.assertEqual(sheet.data(HIDE_TAB)[1][6], "99999")
+        self.assertEqual(sheet.data(HIDE_TAB)[1][0], "12")
+        turned_off = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        turned_off["moderation"]["mode"] = "off"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(turned_off), encoding="utf-8")
+            with mock.patch("sns_comment.moderation_sheet.sort_tabs") as sort:
+                self.assertEqual(main(["--config", str(path), "--apply"]), 0)
+                sort.assert_not_called()
+
+
+class _NameLock:
+    def __init__(self):
+        self.names = []
+
+    def lease(self, seconds=3900, name="state/lease.json"):
+        self.names.append(name)
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
 
 
 def review_row(number, comment_id, decision, memo):
