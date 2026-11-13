@@ -15,7 +15,8 @@ import sys
 from .api import GraphClient, GraphError, PilotError, page_data
 from .cloud_state import CloudError, CloudState
 from .connection_registry import REGISTRY_OBJECT, initial_registry, runtime_configs
-from .moderation import VertexModerator, _rate_limited, backfill_sheet, flush_sheet_log, moderate
+from .moderation import (VertexModerator, _rate_limited, backfill_sheet, comments_waiting_to_hide,
+                         flush_sheet_log, hiding_enabled, load_rulebook, moderate, policy_sha)
 from .profiles import read_settings
 from .storage import timestamp
 from .token_connections import read_token, source_secret
@@ -159,6 +160,13 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
         chosen.append(comment)
         if len(chosen) >= 40:
             break
+    if hiding_enabled(settings):
+        book = load_rulebook(mod.get("policy_version"))
+        for comment in comments_waiting_to_hide(state, account_id, policy_sha(book)):
+            if comment["id"] in seen:
+                continue
+            seen.add(comment["id"])
+            chosen.append(comment)
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
                       region=config.get("region_label"), sheet_client=sheet_client)
     if rate:
@@ -310,6 +318,14 @@ def run(settings, state, project, now=None):
         del token
 
 
+def log_hide_gate(settings):
+    """Say so when the env flag is on but the config mode would ignore it."""
+    mode = ((settings.get("moderation") or {}).get("mode") or "dry_run")
+    if os.environ.get("SNS_MODERATION_HIDE", "").strip() == "1" and mode != "auto_hide":
+        log("moderation_hide_ignored", severity="WARNING", mode=mode,
+            message="SNS_MODERATION_HIDE=1 이지만 moderation.mode 가 auto_hide 가 아니라 실제 숨김은 하지 않습니다.")
+
+
 def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description="새 댓글을 기준표로 분류합니다. 숨김은 설정이 켜진 경우에만 합니다.")
@@ -388,6 +404,7 @@ def main(argv=None):
             except PilotError as error:
                 log("moderation_sheet_failed", error=str(error))
                 return 1
+        log_hide_gate(settings)
         if (settings.get("moderation") or {}).get("mode", "dry_run") == "off":
             log("moderation_off")
             return 0

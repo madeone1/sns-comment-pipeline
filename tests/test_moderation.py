@@ -233,6 +233,29 @@ class HideGateTests(unittest.TestCase):
         self.assertEqual(self.client.hidden, ["30001"])
         self.assertEqual(self.state.data[decision_name(ACCOUNT, "30001")]["status"], "hidden")
 
+    def test_a_stored_would_hide_is_hidden_on_the_next_run_and_the_sheet_says_complete(self):
+        state, sheet = MemoryState(), FakeSheets()
+        comment = audience("X:IN PLEASE", "30080")
+        model = Model({"30080": {**answer("숨김", "D11", reason="같은 작성자의 반복"), "id": "30080"}})
+        moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
+                 region="토론토", sheet_client=sheet)
+        self.assertEqual([row for row in sheet.data(HIDE_TAB) if row[6] == "30080"][0][11], "숨겼을 것(시험)")
+        number = [row for row in sheet.data(HIDE_TAB) if row[6] == "30080"][0][0]
+        class Ready(Hides):
+            def get(self, path, **params):
+                return {"id": path, "hidden": True}
+
+        with mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+            result = moderate([comment], state, AUTO, model, client=Ready(),
+                             account_username="waterbomb_toronto_official", region="토론토", sheet_client=sheet)
+        self.assertEqual(result["hidden"], 1)
+        self.assertEqual(result["would_hide"], 0)
+        row = [item for item in sheet.data(HIDE_TAB) if item[6] == "30080"][0]
+        self.assertEqual(row[0], number)
+        self.assertEqual(row[11], "숨김 완료")
+        self.assertIn("hidden=true", row[12])
+        self.assertEqual(row[4], "X:IN PLEASE")
+
     def test_a_human_keep_is_not_hidden_or_reclassified(self):
         self.state.json_put(decision_name(ACCOUNT, "30001"), {
             "human_decision": "유지", "label": "유지", "status": "kept", "source": "human_sheet"}, 0)
@@ -324,9 +347,73 @@ class SweepTests(unittest.TestCase):
         self.assertIn(ACCOUNT + ":30002", daily["items"])
         self.assertEqual(daily["items"][ACCOUNT + ":30002"]["status_label"], "숨김 예정(시험)")
 
-    def test_shipped_config_is_record_only_and_the_job_does_not_write_the_secret(self):
+    def test_stored_would_hide_outside_the_poll_window_is_hidden_only_when_the_env_flag_is_on(self):
+        from sns_comment.moderation import load_rulebook, policy_sha, text_hash
+        state = MemoryState()
+        text = "X:IN PLEASE"
+        base = {"account_id": ACCOUNT, "text": text, "text_hash": text_hash(text),
+                "policy_sha": policy_sha(load_rulebook()), "label": "숨김", "rule_id": "D11",
+                "reason": "같은 작성자의 반복", "author_username": "fan", "hide_attempts": 0,
+                "written_at": "2026-11-13T05:00:00+00:00"}
+        state.json_put(decision_name(ACCOUNT, "30081"), {**base, "comment_id": "30081", "status": "would_hide", "confidence": "high"}, 0)
+        state.json_put(decision_name(ACCOUNT, "30082"), {**base, "comment_id": "30082", "status": "would_hide", "confidence": "low"}, 0)
+        state.json_put(decision_name(ACCOUNT, "30083"), {
+            **base, "comment_id": "30083", "status": "would_hide", "confidence": "high", "human_decision": "유지"}, 0)
+
+        class Api:
+            def __init__(self):
+                self.hidden = []
+
+            def get(self, path, **params):
+                if path.endswith("/media"):
+                    return {"data": []}
+                return {"id": path, "hidden": True, "timestamp": "2026-11-13T05:00:00+00:00"}
+
+            def hide_comment(self, comment_id):
+                self.hidden.append(comment_id)
+                return {"success": True}
+
+        config = {"account_id": ACCOUNT, "expected_username": "waterbomb_toronto_official", "region_label": "토론토"}
+        settings = {**AUTO, "moderation": {**AUTO["moderation"], "max_age_minutes": 20, "media_limit": 8}}
+        client = Api()
+        quiet = sweep_account(config, state, client, Model({}), settings, dt.datetime(2026, 11, 13, 8, 0, tzinfo=dt.timezone.utc))
+        self.assertEqual(quiet["hidden"], 0)
+        self.assertEqual(client.hidden, [])
+        with mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+            hidden = sweep_account(config, state, client, Model({}), settings, dt.datetime(2026, 11, 13, 8, 0, tzinfo=dt.timezone.utc))
+        self.assertEqual(hidden["hidden"], 1)
+        self.assertEqual(client.hidden, ["30081"])
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30081")]["status"], "hidden")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30082")]["status"], "would_hide")
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30083")]["human_decision"], "유지")
+
+    def test_env_flag_without_auto_hide_logs_a_warning_and_does_not_hide(self):
+        from sns_comment.moderation_job import log_hide_gate, main
+        stream = io.StringIO()
+        with mock.patch("sys.stdout", stream), mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+            log_hide_gate(DRY)
+        line = json.loads(stream.getvalue())
+        self.assertEqual(line["event"], "moderation_hide_ignored")
+        self.assertEqual(line["severity"], "WARNING")
+        self.assertEqual(line["mode"], "dry_run")
+        stream = io.StringIO()
+        with mock.patch("sys.stdout", stream), mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+            log_hide_gate(AUTO)
+        self.assertEqual(stream.getvalue(), "")
+        turned_off = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        turned_off["moderation"]["mode"] = "off"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(turned_off), encoding="utf-8")
+            stream = io.StringIO()
+            with mock.patch("sys.stdout", stream), mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+                self.assertEqual(main(["--config", str(path)]), 0)
+        events = [json.loads(item)["event"] for item in stream.getvalue().splitlines()]
+        self.assertEqual(events, ["moderation_hide_ignored", "moderation_off"])
+
+    def test_shipped_config_hides_only_when_the_env_flag_is_set(self):
         settings = read_settings()
-        self.assertEqual(settings["moderation"]["mode"], "dry_run")
+        self.assertEqual(settings["moderation"]["mode"], "auto_hide")
         self.assertIs(settings["moderation"]["hide_enabled"], False)
         self.assertEqual(settings["moderation"]["sheet"]["spreadsheet_id"], "1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY")
         self.assertNotEqual(settings["moderation"]["sheet"]["spreadsheet_id"], settings["workflow"]["google_sheets"]["spreadsheet_id"])
@@ -518,8 +605,14 @@ class SheetLogTests(unittest.TestCase):
                               region="토론토", sheet_client=sheet)
         self.assertEqual(hidden["hidden"], 1)
         self.assertEqual(client.hidden, ["30001"])
-        self.assertEqual(sheet.data(HIDE_TAB), frozen)
-        self.assertEqual(sheet.data(HIDE_TAB)[0][11], "숨겼을 것(시험)")
+        self.assertEqual(len(sheet.data(HIDE_TAB)), len(frozen))
+        updated = sheet.data(HIDE_TAB)[0]
+        self.assertEqual(updated[0], frozen[0][0])
+        self.assertEqual(updated[6], "30001")
+        self.assertEqual(updated[4], frozen[0][4])
+        self.assertEqual(updated[11], "숨김 완료")
+        self.assertIn("hidden 확인 실패", updated[12])
+        self.assertEqual(sheet.data(HIDE_TAB)[1], frozen[1])
 
     def test_a_sheet_failure_does_not_block_moderation_and_retries_once(self):
         state, sheet = MemoryState(), FakeSheets()

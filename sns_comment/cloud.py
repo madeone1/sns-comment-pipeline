@@ -435,6 +435,7 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                 (config['workflow'].get('google_sheets',{}).get('enabled') and stages['sheets']!='반영 완료') or
                 (config['workflow'].get('google_drive',{}).get('enabled') and stages['drive']!='보관 대조 완료'))
             mod = config.get("moderation") or {}
+            # Record decisions with the morning job. Real hide stays off: this job does not set SNS_MODERATION_HIDE.
             if mod.get("run_with_daily") and mod.get("mode", "dry_run") != "off":
                 try:
                     from .moderation import VertexModerator, moderate, recent_rows
