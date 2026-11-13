@@ -15,6 +15,7 @@ from sns_comment.moderation_sheet import HIDE_TAB, REVIEW_TAB, sync_sheet
 from sns_comment.notion_mcp import NoDailyPage
 from sns_comment.notion_moderation import (
     DATABASE_TITLE, HIDE_URL, REVIEW_URL, _open_locked, hidden_yesterday, notion_decisions_enabled, parse_database,
+    toggle_updates,
     pending_reviews, prepare_notion_decisions, publish_daily_summary, pull_decisions,
     push_results, sheet_memo_status, toggle_title,
 )
@@ -302,6 +303,30 @@ class SummaryTests(unittest.TestCase):
         self.assertIn('inline="false">' + DATABASE_TITLE, text)
         self.assertEqual(text.count("<database"), 2)
         self.assertIn('<mention url="' + DB_URL + '" type="database">', text)
+
+    def test_real_develop_page_anchors_after_the_last_report_toggle(self):
+        fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "notion_daily_2026_11_13_develop.md"
+        page = fixture.read_text(encoding="utf-8")
+        database = {"url": "https://app.notion.com/p/11aabf27f6714bd7ac4fc437a7e5ef65",
+                    "data_source_url": "collection://01e6d1b9-96b7-4234-9965-ab1229bbf794"}
+        updates = toggle_updates(page, DAY, {"total": 2, "by_account": {"서울": 2, "부산": 0, "속초": 0, "토론토": 0}}, 1, database)
+        self.assertEqual(len(updates), 1)
+        old = updates[0]["old_str"]
+        new = updates[0]["new_str"]
+        self.assertNotIn("notion-file-block", old)
+        self.assertNotIn("<unknown", old)
+        self.assertNotIn("<database", old)
+        self.assertNotIn("<image", old)
+        self.assertIn("---", old)
+        self.assertIn("### Contents schedule", old)
+        self.assertEqual(page.count(old), 1)
+        edited = page.replace(old, new, 1)
+        self.assertLess(edited.index("📈 유튜브 구독자"), edited.index(toggle_title(DAY)))
+        self.assertLess(edited.index(toggle_title(DAY)), edited.index("\n---\n\n### Contents schedule"))
+        self.assertIn('<mention url="' + database["url"] + '" type="database">', edited)
+        self.assertEqual(edited.count("<database"), page.count("<database"))
+        self.assertIn('alt="button"', edited)
+        self.assertEqual(page.count("notion-file-block"), edited.count("notion-file-block"))
 
     def test_unparsed_create_response_reuses_the_database_instead_of_creating_another(self):
         self.notion.create_response = {"text": "created"}
