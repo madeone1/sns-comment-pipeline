@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import unittest
 from unittest import mock
@@ -276,6 +277,93 @@ class McpReportTests(unittest.TestCase):
         with self.assertRaisesRegex(PilotError,"여러 개"):
             NotionMcpClient(api,SOURCE).publish("2026-11-05",[])
         self.assertFalse(any(name=="update-page" for name,_ in api.calls))
+
+    def test_same_day_duplicate_uses_only_the_auto_created_page(self):
+        auto = "4190761a512d8189b670cd9d65d6ee6f"
+        moved = "40e0761a512d8006a198d6becd86bc8d"
+        pages = {
+            auto: {"이름": '<date start="2026-11-16" />', "유형": "오늘 업무",
+                   "date:이벤트 시간:start": "2026-11-16",
+                   "date:생성 일시:start": "2026-11-15T16:05:10.000Z"},
+            moved: {"이름": '<p><date start="2026-11-16" /> </p>', "유형": "오늘 업무",
+                    "date:이벤트 시간:start": "2026-11-16",
+                    "date:생성 일시:start": "2026-11-04T02:11:00.000Z"},
+        }
+        api = FakeMcp()
+        original = api.call
+
+        def call(name, args):
+            if name == "query-data-sources":
+                api.calls.append((name, copy.deepcopy(args)))
+                return {"results": [{"url": "https://app.notion.com/p/" + moved},
+                                     {"url": "https://app.notion.com/p/" + auto}], "has_more": False}
+            if name == "fetch" and not args["id"].startswith(("collection://", "notion://")):
+                api.calls.append((name, copy.deepcopy(args)))
+                compact = args["id"].replace("-", "")
+                page_id = auto if auto in compact else moved
+                props = pages[page_id]
+                return {"id": page_id, "url": "https://app.notion.com/p/" + page_id,
+                        "text": "<properties>\n" + json.dumps(props, ensure_ascii=False) + "\n</properties>\n<content>\n</content>"}
+            return original(name, args)
+
+        api.call = call
+        stream = io.StringIO()
+        with mock.patch("sys.stdout", stream):
+            page = NotionMcpClient(api, SOURCE).daily_page("2026-11-16")
+        self.assertEqual(page["id"], auto)
+        logged = json.loads(stream.getvalue())
+        self.assertEqual(logged["event"], "notion_daily_page_duplicate_resolved")
+        self.assertEqual(logged["severity"], "WARNING")
+        self.assertEqual(set(logged["pages"]), {auto, moved})
+        self.assertEqual(logged["chosen"], auto)
+        query = next(args for name, args in api.calls if name == "query-data-sources")
+        self.assertIn("LIMIT 10", query["data"]["query"])
+
+    def test_two_auto_created_pages_for_one_day_are_still_rejected(self):
+        first = "4190761a512d8189b670cd9d65d6ee6f"
+        second = "4190761a512d8189b670cd9d65d6ee6e"
+        props = {"이름": '<date start="2026-11-16" />', "유형": "오늘 업무",
+                 "date:이벤트 시간:start": "2026-11-16",
+                 "date:생성 일시:start": "2026-11-15T16:05:10.000Z"}
+        api = FakeMcp()
+        original = api.call
+
+        def call(name, args):
+            if name == "query-data-sources":
+                return {"results": [{"url": "https://app.notion.com/p/" + first},
+                                     {"url": "https://app.notion.com/p/" + second}]}
+            if name == "fetch" and not args["id"].startswith(("collection://", "notion://")):
+                page_id = second if second in args["id"].replace("-", "") else first
+                return {"id": page_id, "text": "<properties>\n" + json.dumps(props) + "\n</properties>\n<content>\n</content>"}
+            return original(name, args)
+
+        api.call = call
+        with self.assertRaisesRegex(PilotError, "여러 개"):
+            NotionMcpClient(api, SOURCE).daily_page("2026-11-16")
+
+    def test_earliest_day_in_a_range_is_kept_when_a_later_day_is_duplicated(self):
+        friday = "4120761a512d817fae8ff53edda31b9e"
+        api = FakeMcp()
+        original = api.call
+
+        def call(name, args):
+            if name == "query-data-sources":
+                return {"results": [
+                    {"url": "https://app.notion.com/p/" + friday},
+                    {"url": "https://app.notion.com/p/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                    {"url": "https://app.notion.com/p/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                ]}
+            if name == "fetch" and not args["id"].startswith(("collection://", "notion://")):
+                compact = args["id"].replace("-", "")
+                day = "2026-11-13" if friday in compact else "2026-11-14"
+                props = {"유형": "오늘 업무", "date:이벤트 시간:start": day, "이름": "other"}
+                page_id = friday if friday in compact else compact[-32:]
+                return {"id": page_id, "text": "<properties>\n" + json.dumps(props) + "\n</properties>\n<content>\n</content>"}
+            return original(name, args)
+
+        api.call = call
+        page = NotionMcpClient(api, SOURCE).daily_page("2026-11-13", through_day="2026-11-15")
+        self.assertEqual(page["id"], friday)
 
     def test_three_account_reports_coexist_and_rerun_updates_only_selected_account(self):
         api = FakeMcp()

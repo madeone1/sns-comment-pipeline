@@ -168,6 +168,19 @@ class SummaryTests(unittest.TestCase):
         return publish_daily_summary(SETTINGS, self.state, self.sheet, self.notion, self.finder, now=NOW,
                                      attempts=attempts, wait_seconds=300, sleeper=self.waits.append)
 
+    def test_a_handwritten_toggle_with_the_same_title_is_not_duplicated(self):
+        manual = DAILY_PAGE.replace(
+            "### Info",
+            '<toggle heading="h3">\n💬 인스타 댓글 관리 (2026-11-13)\n\n손으로 넣은 토글\n</toggle>\n\n### Info')
+        self.notion.pages["daily-page"] = manual
+        result = self.publish()
+        self.assertEqual(result["status"], "unchanged")
+        text = self.notion.pages["daily-page"]
+        self.assertEqual(text.count(toggle_title(DAY)), 1)
+        self.assertIn("손으로 넣은 토글", text)
+        self.assertFalse(any(name == "update-page" and args.get("command") == "update_content"
+                             for name, args in self.notion.calls))
+
     def test_toggle_is_appended_once_with_counts_and_the_decision_table(self):
         result = self.publish()
         self.assertEqual(result["status"], "inserted")
