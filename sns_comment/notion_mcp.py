@@ -93,6 +93,69 @@ def properties(page):
     return json.loads(match.group(1))
 
 
+KST = dt.timezone(dt.timedelta(hours=9))
+DAILY_PAGE_LIMIT = 10
+EXACT_DATE_TITLE = re.compile(r'^<date start="(\d{4}-\d{2}-\d{2})"\s*/>$')
+
+
+def _log(event, **values):
+    print(json.dumps({"event": event, **values}, ensure_ascii=False), flush=True)
+
+
+def _created_kst(props, page):
+    raw = None
+    for key in ("date:생성 일시:start", "생성 일시", "created_time", "createdTime"):
+        if isinstance(props, dict) and props.get(key):
+            raw = props[key]
+            break
+    if raw is None and isinstance(page, dict):
+        raw = page.get("created_time") or page.get("createdTime")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(KST)
+
+
+def _exact_date_title(props, event_day):
+    raw = props.get("이름") if isinstance(props, dict) else None
+    if not isinstance(raw, str):
+        raw = props.get("title") if isinstance(props, dict) and isinstance(props.get("title"), str) else ""
+    match = EXACT_DATE_TITLE.match(raw.strip())
+    return bool(match and match.group(1) == event_day)
+
+
+def auto_created_daily_page(page, event_day):
+    """The page Notion makes for that day: exact date title, created that day or the day before (KST)."""
+    props = page.get("_props") if isinstance(page, dict) else None
+    created = _created_kst(props, page)
+    if created is None or not _exact_date_title(props, event_day):
+        return False
+    event = dt.date.fromisoformat(event_day)
+    start = dt.datetime.combine(event - dt.timedelta(days=1), dt.time(0, 0), tzinfo=KST)
+    end = dt.datetime.combine(event + dt.timedelta(days=1), dt.time(0, 0), tzinfo=KST)
+    return start <= created < end
+
+
+def choose_daily_page(candidates):
+    """Earliest event day. A same-day duplicate is kept only when one page is the auto-created page."""
+    ordered = sorted(candidates, key=lambda page: (page["_daily_day"], page.get("id") or ""))
+    earliest = ordered[0]["_daily_day"]
+    same = [page for page in ordered if page["_daily_day"] == earliest]
+    if len(same) == 1:
+        return same[0]
+    picked = [page for page in same if auto_created_daily_page(page, earliest)]
+    if len(picked) != 1:
+        raise PilotError(f"{earliest} 일일 업무 페이지가 여러 개입니다. 임의 선택하지 않습니다.")
+    _log("notion_daily_page_duplicate_resolved", severity="WARNING", day=earliest,
+         chosen=picked[0].get("id"), pages=[page.get("id") for page in same])
+    return picked[0]
+
+
 def root_matches(pattern, content):
     """Ignore headings in archived merge appendices and other native containers."""
     found, stack, offset, fence = [], [], 0, None
@@ -205,7 +268,7 @@ class NotionMcpClient:
         query={"data":{"mode":"sql","data_source_urls":[source],
             "query":f'SELECT url,"유형","date:이벤트 시간:start" FROM "{source}" WHERE "유형"=? '
                     'AND substr("date:이벤트 시간:start",1,10)>=? AND substr("date:이벤트 시간:start",1,10)<=? '
-                    'ORDER BY substr("date:이벤트 시간:start",1,10),url LIMIT 2',
+                    'ORDER BY substr("date:이벤트 시간:start",1,10),url LIMIT ' + str(DAILY_PAGE_LIMIT),
             "params":["오늘 업무",start.isoformat(),stop.isoformat()]}}
         try:
             result=self.client.call("query-data-sources",query)
@@ -233,7 +296,7 @@ class NotionMcpClient:
                      "value":{"type":"exact","value":start.isoformat()}},
                     {"type":"property","property":"이벤트 시간","propertyType":"date","operator":"date_is_on_or_before",
                      "value":{"type":"exact","value":stop.isoformat()}}]},
-                "sort":[{"property":"이벤트 시간","direction":"ascending"}],"limit":2}})
+                "sort":[{"property":"이벤트 시간","direction":"ascending"}],"limit":DAILY_PAGE_LIMIT}})
             if not isinstance(result,dict) or not isinstance(result.get("results"),list):
                 raise PilotError("Notion 일일 업무 재조회 응답 형식을 확인하지 못했습니다.")
             rows=result["results"]
@@ -253,14 +316,11 @@ class NotionMcpClient:
             expected=page_id(row["url"])
             if page.get("id") and page_id(page["id"])!=expected:
                 raise PilotError("일일 업무 페이지 응답이 조회한 대상과 다릅니다.")
-            page.update(id=expected,_daily_day=event_day)
+            page.update(id=expected,_daily_day=event_day,_props=props)
             candidates.append(page)
-        candidates.sort(key=lambda page:page["_daily_day"])
-        if len(candidates)>1 and candidates[0]["_daily_day"]==candidates[1]["_daily_day"]:
-            raise PilotError(f"{candidates[0]['_daily_day']} 일일 업무 페이지가 여러 개입니다. 임의 선택하지 않습니다.")
-        if result.get("has_more") and len(candidates)<2:
+        if result.get("has_more"):
             raise PilotError("일일 업무 조회 결과가 불완전해 기록을 보류합니다.")
-        return candidates[0]
+        return choose_daily_page(candidates)
 
     def publish(self,day,sections,through_day=None,guideline_validator=None):
         if not self.markdown_loaded:
