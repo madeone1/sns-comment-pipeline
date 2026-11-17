@@ -323,6 +323,8 @@ class SweepTests(unittest.TestCase):
 
             def get(self, path, **params):
                 self.gets.append(path)
+                if path.endswith('/replies'):
+                    return {'data': []}
                 return payloads[path]
 
             def hide_comment(self, comment_id):
@@ -591,7 +593,7 @@ class SheetLogTests(unittest.TestCase):
         self.assertEqual(row[8], "D3")
         self.assertEqual(row[10], "높음")
         self.assertEqual(row[11], "숨겼을 것(시험)")
-        self.assertIn("KST 자동 감지(10분 작업)", row[12])
+        self.assertIn("KST 자동 감지(30분 작업)", row[12])
         updates = len(sheet.updates)
         again = moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official",
                          region="토론토", sheet_client=sheet)

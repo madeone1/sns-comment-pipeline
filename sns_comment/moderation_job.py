@@ -1,8 +1,9 @@
-"""Classify new comments within the polling window. Hiding stays off unless configured.
+"""Classify a durable comment queue. Hiding stays off unless configured.
 
 The webhook receiver is unchanged: it still stores IDs only. This job reads those IDs
 and also polls recent comments, so an account without a webhook (토론토) is still covered.
-It does not delete pending webhook objects and does not write the Meta secret.
+It checkpoints comment and reply pages before classification, keeps overflow, and
+never deletes webhook evidence or writes the Meta secret.
 """
 
 import argparse
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 from .api import GraphClient, GraphError, PilotError, page_data
 from .cloud_state import CloudError, CloudState
@@ -19,11 +21,10 @@ from .moderation import (VertexModerator, _rate_limited, backfill_sheet, comment
                          flush_sheet_log, hiding_enabled, load_rulebook, moderate, policy_sha)
 from .profiles import read_settings
 from .storage import timestamp
-from .token_connections import read_token, source_secret
+from .token_connections import STATUS_OBJECT, read_token, source_secret
 
 
 ROOT = Path(__file__).resolve().parent.parent
-COMMENT_FIELDS = "id,text,timestamp,username,from,hidden,replies.limit(10){id,text,timestamp,username,from,hidden}"
 
 
 def log(event, **values):
@@ -53,113 +54,23 @@ def comment_from_payload(item, account_id, owner, media_id, parent_id=None, perm
             "permalink": link, "already_hidden": item.get("hidden") is True}
 
 
-def flatten(payload, account_id, owner, media_id, permalink=None):
-    for item in page_data(payload):
-        yield comment_from_payload(item, account_id, owner, media_id, permalink=permalink)
-        replies = item.get("replies") if isinstance(item, dict) else None
-        nested = replies.get("data") if isinstance(replies, dict) else None
-        if isinstance(nested, list):
-            for reply in nested:
-                if isinstance(reply, dict):
-                    yield comment_from_payload(reply, account_id, owner, media_id, parent_id=item.get("id"), permalink=permalink)
-
-
-def attach_permalinks(client, comments):
-    needed = sorted({comment.get("media_id") for comment in comments
-                     if isinstance(comment.get("media_id"), str) and comment["media_id"].isdigit() and not comment.get("permalink")})
-    found = {}
-    for media_id in needed:
-        try:
-            item = client.get(media_id, fields="permalink")
-        except GraphError as error:
-            if _rate_limited(error):
-                break
-            continue
-        if isinstance(item, dict) and isinstance(item.get("permalink"), str):
-            found[media_id] = item["permalink"]
-    for comment in comments:
-        if not comment.get("permalink"):
-            comment["permalink"] = found.get(comment.get("media_id"))
-    return comments
-
-
-def pending_comments(state, client, account_id, owner):
-    """Read webhook IDs. Leave the pending objects for the daily job."""
-    objects, _ = state.list_objects("webhook/pending/" + account_id + "/", 40)
-    found = []
-    for obj in objects:
-        event, _ = state.json_get(obj["name"])
-        if not isinstance(event, dict) or event.get("account_id") != account_id:
-            continue
-        comment_id = event.get("comment_id")
-        if not isinstance(comment_id, str) or not comment_id.isdigit():
-            continue
-        try:
-            item = client.get(comment_id, fields="id,text,timestamp,username,from,hidden")
-        except GraphError as error:
-            if _rate_limited(error):
-                raise
-            continue
-        comment = comment_from_payload(item, account_id, owner, event.get("media_id"))
-        found.append(comment)
-    return attach_permalinks(client, found)
-
-
-def poll_recent(client, account_id, owner, cutoff, media_limit):
-    try:
-        media = page_data(client.get(account_id + "/media", fields="id,permalink,timestamp", limit=media_limit))
-    except GraphError as error:
-        if _rate_limited(error):
-            return [], "rate_limited"
-        raise
-    found = []
-    for item in media:
-        media_id = item.get("id")
-        if not isinstance(media_id, str) or not media_id.isdigit():
-            continue
-        try:
-            payload = client.get(media_id + "/comments", fields=COMMENT_FIELDS, limit=25)
-            link = item.get("permalink") if isinstance(item.get("permalink"), str) else None
-            rows = list(flatten(payload, account_id, owner, media_id, permalink=link))
-        except GraphError as error:
-            if _rate_limited(error):
-                return found, "rate_limited"
-            continue
-        except PilotError:
-            continue
-        for comment in rows:
-            if not comment.get("written_at"):
-                continue
-            if dt.datetime.fromisoformat(comment["written_at"]) < cutoff:
-                continue
-            found.append(comment)
-    return attach_permalinks(client, found), None
-
-
 def sweep_account(config, state, client, model, settings, now, sheet_client=None):
+    from .moderation_polling import Polling
     account_id = config["account_id"]
     owner = config["expected_username"].lstrip("@")
     mod = settings.get("moderation") or {}
-    cutoff = now - dt.timedelta(minutes=int(mod.get("max_age_minutes") or 20))
-    rate = None
-    comments = []
-    try:
-        comments.extend(pending_comments(state, client, account_id, owner))
-    except GraphError as error:
-        if not _rate_limited(error):
-            raise
-        rate = "rate_limited"
-    if rate is None:
-        polled, rate = poll_recent(client, account_id, owner, cutoff, int(mod.get("media_limit") or 8))
-        comments.extend(polled)
-    chosen, seen = [], set()
-    for comment in sorted(comments, key=lambda row: str(row.get("written_at") or ""), reverse=True):
-        if comment.get("id") in seen:
-            continue
-        seen.add(comment.get("id"))
-        chosen.append(comment)
-        if len(chosen) >= 40:
-            break
+    polling = Polling(state, account_id, owner, mod, now, comment_from_payload)
+    deadline = time.monotonic() + int(mod.get('poll_seconds') or 90)
+    polling.webhooks(client, deadline=deadline)
+    if not polling.blocked:
+        polling.peek(client, deadline)
+    if not polling.blocked:
+        polling.scan(client, 'recent', int(mod.get('recent_pages_per_run') or 16), deadline)
+    if not polling.blocked:
+        polling.scan(client, 'catalog', int(mod.get('catalog_pages_per_run') or 8), deadline)
+    queued = polling.pending(int(mod.get('processing_batch_size') or 40))
+    chosen = list(queued)
+    seen = {row['id'] for row in chosen}
     if hiding_enabled(settings):
         book = load_rulebook(mod.get("policy_version"))
         for comment in comments_waiting_to_hide(state, account_id, policy_sha(book)):
@@ -169,8 +80,15 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
             chosen.append(comment)
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
                       region=config.get("region_label"), sheet_client=sheet_client)
-    if rate:
-        result["status"] = "rate_limited"
+    polling.acknowledge(queued)
+    result['coverage'] = polling.coverage()
+    if polling.error:
+        result['status'] = 'rate_limited' if _rate_limited(polling.error) else 'pending'
+        result['poll_error'] = str(polling.error)
+    elif (result['status'] == 'complete' and (result['coverage']['queued'] or
+          not result['coverage']['recent_complete'] or not result['coverage']['catalog_complete'])):
+        result['status'] = 'pending'
+    log('moderation_coverage', account=owner, status=result['status'], **result['coverage'])
     result["account"] = owner
     result["seen"] = len(seen)
     return result
@@ -178,6 +96,10 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
 
 def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
     moment = now or dt.datetime.now(dt.timezone.utc)
+    if configs:
+        # Rotate the starting account so a shared request budget cannot starve one account.
+        offset = (int(moment.timestamp()) // 1800) % len(configs)
+        configs = configs[offset:] + configs[:offset]
     results = []
     for config in configs:
         try:
@@ -190,6 +112,8 @@ def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
         status = "failed"
     elif any(item.get("status") == "rate_limited" for item in results):
         status = "rate_limited"
+    elif any(item.get("status") == "pending" for item in results):
+        status = "pending"
     return {"status": status, "accounts": results,
             "classified": sum(item.get("classified") or 0 for item in results),
             "would_hide": sum(item.get("would_hide") or 0 for item in results),
@@ -313,6 +237,16 @@ def run(settings, state, project, now=None):
                 log("human_decision_failed", error=str(error))
             if notion is not None:
                 complete_notion_decisions(notion, sheet, now=now)
+        revision = registry.get('token_control', {}).get('revision')
+        if revision:
+            status, generation = state.json_get(STATUS_OBJECT, {})
+            if status.get('revision') == revision:
+                ready = result['status'] not in {'failed', 'rate_limited'}
+                state.json_put(STATUS_OBJECT, {**status,
+                    'status': 'ready' if ready else 'sync_pending',
+                    'stage': '댓글 관리 작업에서 계정 연결 확인' if ready else '댓글 관리 재시도 대기',
+                    'moderation_status': result['status'],
+                    'checked_at': dt.datetime.now(dt.timezone.utc).isoformat()}, generation)
         return result
     finally:
         del token
@@ -419,7 +353,7 @@ def main(argv=None):
                 return 1
             try:
                 from .cloud_state import MODERATION_LEASE
-                with state.lease(540, MODERATION_LEASE):
+                with state.lease(1620, MODERATION_LEASE):
                     result = backfill_sheet(state, sheet)
                 log("moderation_sheet_backfill", **result)
                 return 0
@@ -439,7 +373,7 @@ def main(argv=None):
         state = CloudState(os.environ["SNS_STATE_BUCKET"])
         try:
             from .cloud_state import MODERATION_LEASE
-            with state.lease(540, MODERATION_LEASE):
+            with state.lease(1620, MODERATION_LEASE):
                 result = run(settings, state, project)
         except CloudError as error:
             if "진행 중" in str(error) or "잠금" in str(error):

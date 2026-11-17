@@ -49,11 +49,34 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(cli.call_count, 1)
         self.assertEqual(cli.call_args.args[0][:2], ['builds', 'describe'])
 
-    def test_missing_report_identifiers_stop_before_any_cloud_call(self):
-        with mock.patch.object(release, 'gcloud') as cli:
-            with self.assertRaises(SystemExit):
-                release.verify(None, None)
-        cli.assert_not_called()
+    def test_verification_uses_moderation_without_daily_report_identifiers(self):
+        calls = []
+        def gcloud(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ['builds', 'describe']:
+                return SimpleNamespace(stdout='SUCCESS')
+            if args[:2] == ['storage', 'cat']:
+                return SimpleNamespace(stdout='{"status":"verified","image":"registry/worker:new","accounts":[]}')
+            return SimpleNamespace(stdout='')
+        with mock.patch.object(release, 'gcloud', side_effect=gcloud):
+            release.verify()
+        created = next(c for c in calls if c[:3] == ['run', 'jobs', 'create'])
+        self.assertIn('--args=-m,sns_comment.moderation_release_check', created)
+        self.assertFalse(any('SNS_VERIFY_DAY' in arg or 'SNS_VERIFY_PAGE' in arg for arg in created))
+        self.assertEqual(calls[-1][:3], ['run', 'jobs', 'delete'])
+
+    def test_deploy_targets_only_active_jobs_and_preserves_env(self):
+        release.save('candidate-result', {'status':'verified','image':'registry/worker:new'})
+        calls=[]
+        def gcloud(args, **kwargs):
+            calls.append(args)
+            return SimpleNamespace(stdout='SUCCESS' if args[:2]==['builds','describe'] else '')
+        with mock.patch.object(release,'gcloud',side_effect=gcloud), mock.patch.object(release,'ensure_scheduler_invoker'):
+            release.deploy()
+        updates=[c for c in calls if c[:3]==['run','jobs','update']]
+        self.assertEqual([c[3] for c in updates],['sns-comments-moderate','sns-comments-notion-summary'])
+        self.assertTrue(all(not any(a.startswith('--set-env-vars') for a in c) for c in updates))
+        self.assertIn('--task-timeout=1500s',updates[0])
 
 
 if __name__ == '__main__':

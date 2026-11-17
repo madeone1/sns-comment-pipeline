@@ -69,6 +69,7 @@
     "verify_report_guidelines": true
   },
   "cloud": {
+    "daily_enabled": false,
     "scheduled_accounts": [
       "waterbomb_busan_official",
       "waterbomb_sokcho_official",
@@ -108,9 +109,14 @@
     "policy_version": "v2.3",
     "mode": "auto_hide",
     "hide_enabled": false,
-    "run_with_daily": true,
-    "interval_minutes": 10,
-    "max_age_minutes": 20,
+    "run_with_daily": false,
+    "interval_minutes": 30,
+    "max_age_minutes": 60,
+    "overlap_minutes": 10,
+    "recent_pages_per_run": 16,
+    "catalog_pages_per_run": 8,
+    "poll_seconds": 90,
+    "processing_batch_size": 40,
     "media_limit": 8,
     "batch_size": 20,
     "sheet": {
