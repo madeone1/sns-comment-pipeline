@@ -39,6 +39,23 @@ class CloudStateTests(unittest.TestCase):
         self.assertEqual(state.get("state/comments.sqlite3"),(b"raw checkpoint",11))
         self.assertIn("generation=11",transport.request.call_args.args[1])
 
+    def test_list_page_stops_after_one_page(self):
+        transport = mock.Mock()
+        transport.json.return_value = {"items": [{"name": "moderation/decisions/1/9.json", "generation": "3"}],
+                                        "nextPageToken": "NEXT"}
+        state = CloudState("private", transport)
+        items, token = state.list_page("moderation/decisions/1/", 40, None)
+        self.assertEqual(items, [{"name": "moderation/decisions/1/9.json", "generation": 3}])
+        self.assertEqual(token, "NEXT")
+        self.assertIn("maxResults=40", transport.json.call_args.args[1])
+        self.assertNotIn("pageToken", transport.json.call_args.args[1])
+        state.list_page("moderation/decisions/1/", 40, "NEXT")
+        self.assertIn("pageToken=NEXT", transport.json.call_args.args[1])
+        state.list_page("moderation/decisions/1/", 30, start_offset="moderation/decisions/1/9.json")
+        self.assertIn("startOffset=moderation%2Fdecisions%2F1%2F9.json%0A", transport.json.call_args.args[1])
+        self.assertNotIn("pageToken", transport.json.call_args.args[1])
+        self.assertEqual(transport.json.call_count, 3)
+
 
 class LeaseRetryTests(unittest.TestCase):
     def test_a_busy_lock_is_retried_and_then_entered(self):

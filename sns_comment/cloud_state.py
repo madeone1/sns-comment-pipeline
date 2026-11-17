@@ -5,9 +5,10 @@ runs/*, state/comments.sqlite3, state/reports.json, pipeline/*, the connection
 registry, and daily-merge/*. The moderation job does not take it.
 
 state/moderation-lease.json covers moderation/decisions/*, moderation/repeat-index/*,
-moderation/daily/*, and moderation/sheet-pending.json. The morning job takes this
-lock only while it classifies, so it cannot write those objects at the same time
-as the 10-minute job. Every write also sends the GCS generation it read.
+moderation/pending-hides/*, moderation/daily/*, and moderation/sheet-pending.json.
+The morning job takes this lock only while it classifies, so it cannot write those
+objects at the same time as the 10-minute job. Every write also sends the GCS
+generation it read.
 
 state/notion-moderation-lease.json covers moderation/notion-decision-database.json
 and the daily comment toggle. state/notion-summary-lease.json stops two summary
@@ -122,12 +123,23 @@ class CloudState:
 
     def list_objects(self, prefix, limit=100):
         """One bounded queue snapshot; never traverse the raw-data bucket."""
-        query = urllib.parse.urlencode({'prefix': self.prefix + prefix, 'maxResults': limit,
-            'fields': 'items(name,generation),nextPageToken'})
-        value = self.transport.json('GET', f'https://storage.googleapis.com/storage/v1/b/{self.bucket}/o?'+query)
-        items = [{'name': r['name'][len(self.prefix):], 'generation': int(r['generation'])}
-                 for r in value.get('items', [])]
-        return items, bool(value.get('nextPageToken'))
+        items, token = self.list_page(prefix, limit, None)
+        return items, bool(token)
+
+    def list_page(self, prefix, limit=50, page_token=None, start_offset=None):
+        """One page of names. A start offset is the last name already handled, exclusive."""
+        query = {'prefix': self.prefix + prefix, 'maxResults': max(1, int(limit)),
+                 'fields': 'items(name,generation),nextPageToken'}
+        if page_token:
+            query['pageToken'] = page_token
+        if start_offset:
+            query['startOffset'] = self.prefix + start_offset + "\n"
+        value = self.transport.json('GET', 'https://storage.googleapis.com/storage/v1/b/' + self.bucket + '/o?'
+                                    + urllib.parse.urlencode(query))
+        items = [{'name': row['name'][len(self.prefix):], 'generation': int(row['generation'])}
+                 for row in value.get('items', [])]
+        token = value.get('nextPageToken')
+        return items, token if isinstance(token, str) and token else None
 
     def list_all(self, prefix, page_size=200):
         items, token = [], None
