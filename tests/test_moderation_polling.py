@@ -149,6 +149,30 @@ class PollingTests(unittest.TestCase):
         self.assertEqual(later.active_exceptions(), {})
         self.assertTrue(later.coverage()['catalog_complete'])
 
+    def test_recovered_object_and_new_catalog_can_overlap_without_false_cursor_loop(self):
+        p = polling()
+        api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}]),
+                   ('20001/comments', None): GraphError(400, 100, 33)})
+        p.scan(api, 'catalog', 20)
+        later = polling(p.state, NOW + dt.timedelta(hours=2))
+        api.pages[('20001/comments', None)] = page([comment(30001)], 'c2')
+        api.pages[('20001/comments', 'c2')] = page([comment(30002)])
+        later.retry_unavailable(api)
+        later.scan(api, 'catalog', 20)
+        self.assertIsNone(later.error)
+        self.assertTrue(later.coverage()['catalog_complete'])
+        self.assertEqual(set(later.data['queue']), {'30001', '30002'})
+
+    def test_multi_page_cursor_cycle_is_still_detected_per_chain(self):
+        p = polling()
+        api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}]),
+                   ('20001/comments', None): page([], 'a'),
+                   ('20001/comments', 'a'): page([], 'b'),
+                   ('20001/comments', 'b'): page([], 'a')})
+        p.scan(api, 'catalog', 20)
+        self.assertIsNotNone(p.error)
+        self.assertFalse(p.coverage()['catalog_complete'])
+
     def test_cursor_error_33_is_restarted_before_deferring_the_object(self):
         p = polling()
         api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}]),

@@ -251,12 +251,9 @@ class Polling:
                 else:
                     # Reintroduce the original task and its oldest time floor.
                     # The normal scanner follows every recovered next/reply page.
-                    task = {**row['task'], 'since': row['since']}
+                    task = {**row['task'], 'since': row['since'], 'trail': []}
                     self.start_lane(row['lane'])
                     payload = client.get(task['path'], **self.params(task, row['lane']))
-                    checkpoint = self.data[row['lane']]
-                    checkpoint['visited'] = [v for v in checkpoint['visited']
-                                             if not v.startswith(task['path'] + ':')]
                     self.apply_page(row['lane'], task, payload, recovering=True)
                 self.resolve(key)
             except PilotError as error:
@@ -343,13 +340,18 @@ class Polling:
                         after = None
                     followups.append({'kind': 'replies', 'path': item['id'] + '/replies',
                                       'after': after, 'media_id': task['media_id'],
-                                      'parent_id': item['id'], 'link': task.get('link')})
+                                      'parent_id': item['id'], 'link': task.get('link'), 'trail': []})
         marker = task['path'] + ':' + str(task.get('after') or '')
         if cursor and (task['kind'] != 'media' or lane == 'catalog'):
             next_marker = task['path'] + ':' + cursor
-            if next_marker == marker or next_marker in checkpoint['visited']:
+            trail = task.get('trail')
+            if trail is None:
+                # Existing cursors predate per-chain trails. Fresh first pages
+                # and recovered objects start independent pagination chains.
+                trail = [v for v in checkpoint['visited'] if v.startswith(task['path'] + ':')] if task.get('after') else []
+            if next_marker == marker or next_marker in trail:
                 raise PilotError('댓글 조회 페이지 커서가 반복됩니다. 완료로 처리하지 않습니다.')
-            followups.append({**task, 'after': cursor})
+            followups.append({**task, 'after': cursor, 'trail': trail + [marker]})
         # A recovered object can have comments older than the current scan's
         # floor. Its entire pagination retains the original floor.
         if task.get('since'):
@@ -425,6 +427,7 @@ class Polling:
                 except PilotError as error:
                     if isinstance(error, GraphError) and error.code == 100 and task.get('after'):
                         task.pop('after', None)
+                        task['trail'] = []
                         checkpoint['visited'] = [v for v in checkpoint['visited']
                                                  if not v.startswith(task['path'] + ':')]
                         self.error, stop = error, True
