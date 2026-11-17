@@ -123,9 +123,9 @@
     "batch_size": 20,
     "rulebook": {
       "source": "notion",
-      "database_id": "41b0761a512d81ebbab8f5bf230b79ee",
-      "data_source_url": "collection://41b0761a-512d-8177-b2bf-000b4341a535",
-      "page_id": "41b0761a512d8195adf2fed4250385bb"
+      "database_id": "41b0761a512d8172823bffc0cf69ca21",
+      "data_source_url": "collection://41b0761a-512d-814c-aec7-000b844d9f30",
+      "page_id": "41b0761a512d81259c81d50af0fec6a3"
     },
     "sheet": {
       "spreadsheet_id": "1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY"
