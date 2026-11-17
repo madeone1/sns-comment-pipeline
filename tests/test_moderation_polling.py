@@ -50,6 +50,33 @@ def polling(state=None, now=NOW, **settings):
 
 
 class PollingTests(unittest.TestCase):
+    def test_lost_write_response_adopts_committed_generation_without_overwrite(self):
+        from sns_comment.cloud_state import CloudError
+        class LostResponse(MemoryState):
+            def json_put(self, name, value, generation=None):
+                saved = super().json_put(name, value, generation)
+                if self.counter == 1:
+                    raise CloudError('connection closed after commit', 0)
+                return saved
+        state = LostResponse()
+        p = polling(state)
+        p.save()
+        self.assertEqual(p.generation, 1)
+        p.save()
+        self.assertEqual(p.generation, 2)
+
+    def test_transient_read_retries_and_permission_failure_does_not(self):
+        from sns_comment.cloud_state import CloudError
+        from sns_comment.moderation_polling import read_retry
+        call = mock.Mock(side_effect=[CloudError('temporary', 503), ('value', 1)])
+        with mock.patch('sns_comment.moderation_polling.time.sleep'):
+            self.assertEqual(read_retry(call), ('value', 1))
+        self.assertEqual(call.call_count, 2)
+        denied = mock.Mock(side_effect=CloudError('permission', 403))
+        with self.assertRaises(CloudError):
+            read_retry(denied)
+        self.assertEqual(denied.call_count, 1)
+
     def test_retired_daily_exits_before_authentication_collection_or_reporting(self):
         from sns_comment import cloud
         with mock.patch.object(cloud, 'CloudState') as state, mock.patch.object(cloud, 'cloud_credentials') as oauth:

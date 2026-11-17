@@ -9,11 +9,26 @@ import hashlib
 import time
 
 from .api import GraphError, PilotError, RequestBudgetExceeded, next_cursor, page_data
+from .cloud_state import CloudError
 
 
 UTC = dt.timezone.utc
 FIELDS = 'id,text,timestamp,username,from,hidden'
 COMMENT_FIELDS = FIELDS + ',replies.limit(50){' + FIELDS + '}'
+
+
+def transient(error):
+    return isinstance(error, CloudError) and error.status in {0, 429, 500, 502, 503, 504}
+
+
+def read_retry(operation):
+    for attempt in range(3):
+        try:
+            return operation()
+        except CloudError as error:
+            if not transient(error) or attempt == 2:
+                raise
+            time.sleep(0.5 * (2 ** attempt))
 
 
 def state_name(account_id):
@@ -32,7 +47,7 @@ class Polling:
         self.state, self.account_id, self.owner = state, account_id, owner
         self.settings, self.now, self.convert = settings, now.astimezone(UTC), convert
         self.name = state_name(account_id)
-        self.data, self.generation = state.json_get(self.name, {})
+        self.data, self.generation = read_retry(lambda: state.json_get(self.name, {}))
         if not isinstance(self.data, dict):
             raise PilotError('댓글 조회 체크포인트 형식을 확인해주세요.')
         if self.data.get('account_id', account_id) != account_id:
@@ -60,7 +75,25 @@ class Polling:
     def save(self):
         self.data['account_id'] = self.account_id
         self.data['updated_at'] = self.now.isoformat()
-        self.generation = self.state.json_put(self.name, self.data, self.generation)
+        self.data['last_error'] = str(self.error) if self.error else None
+        for attempt in range(3):
+            try:
+                self.generation = self.state.json_put(self.name, self.data, self.generation)
+                return
+            except CloudError as error:
+                if not transient(error):
+                    raise
+                # A timed-out write can already have committed. Read it back
+                # before retrying so its successful generation is never lost.
+                current, generation = read_retry(lambda: self.state.json_get(self.name))
+                if current == self.data:
+                    self.generation = generation
+                    return
+                if generation != self.generation:
+                    raise CloudError('댓글 체크포인트가 다른 경로에서 변경됐습니다.', 412) from None
+                if attempt == 2:
+                    raise
+                time.sleep(0.5 * (2 ** attempt))
 
     def enqueue(self, item, media_id, parent_id=None, link=None, since=None):
         comment = self.convert(item, self.account_id, self.owner, media_id,
@@ -79,9 +112,9 @@ class Polling:
     def webhooks(self, client, limit=24, deadline=None):
         prefix = 'webhook/pending/' + self.account_id + '/'
         if hasattr(self.state, 'list_all'):
-            objects = self.state.list_all(prefix)
+            objects = read_retry(lambda: self.state.list_all(prefix))
         else:
-            objects, more = self.state.list_objects(prefix, 1000)
+            objects, more = read_retry(lambda: self.state.list_objects(prefix, 1000))
             if more:
                 raise PilotError('웹훅 수신함을 끝까지 조회하지 못했습니다.')
         used = 0
@@ -94,7 +127,7 @@ class Polling:
             name = obj['name']
             if self.data['receipts'].get(name) == obj.get('generation'):
                 continue
-            event, generation = self.state.json_get(name)
+            event, generation = read_retry(lambda: self.state.json_get(name))
             if not isinstance(event, dict) or event.get('account_id') != self.account_id:
                 continue
             identifier = event.get('comment_id')
