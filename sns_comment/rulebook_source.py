@@ -14,9 +14,9 @@ from .moderation import load_rulebook, policy_sha
 
 
 CACHE_NAME = "moderation/rulebook-cache.json"
-DEFAULT_DATABASE_ID = "41b0761a512d81ebbab8f5bf230b79ee"
-DEFAULT_DATA_SOURCE = "collection://41b0761a-512d-8177-b2bf-000b4341a535"
-DEFAULT_PAGE_ID = "41b0761a512d8195adf2fed4250385bb"
+DEFAULT_DATABASE_ID = "41b0761a512d8172823bffc0cf69ca21"
+DEFAULT_DATA_SOURCE = "collection://41b0761a-512d-814c-aec7-000b844d9f30"
+DEFAULT_PAGE_ID = "41b0761a512d81259c81d50af0fec6a3"
 COLUMNS = ("이름", "코드", "결과", "순서", "설명", "예외", "사용")
 RESULT_LABEL = {"숨김": "삭제", "사람 판단": "사람판단", "유지": "유지", "폐지": "폐지"}
 ACTIVE_RESULTS = {"숨김", "사람 판단", "유지"}
@@ -164,30 +164,102 @@ def _dashed(compact):
     return compact[0:8] + "-" + compact[8:12] + "-" + compact[12:16] + "-" + compact[16:20] + "-" + compact[20:32]
 
 
-def _edited(payload):
-    if not isinstance(payload, dict):
+_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+_EDIT_ATTR = re.compile(
+    r"(?:page_last_edited_at|last_edited_time|last_edited_at|lastEditedTime|last-edited-time)"
+    r"""["'\s:=]+["']?(""" + _TIME.pattern + r")",
+    re.I)
+_TRASH_ATTR = re.compile(r"(?:in[-_]trash|archived|is[-_]archived)\s*=\s*[\"']?\s*true\b", re.I)
+
+
+def _time_value(value):
+    if not isinstance(value, str):
         return ""
-    for key in ("page_last_edited_at", "last_edited_time", "last_edited_at"):
-        if isinstance(payload.get(key), str) and payload[key].strip():
-            return payload[key].strip()
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict):
-        return _edited(metadata)
+    match = _TIME.search(value.strip())
+    return match.group(0) if match else ""
+
+
+def _edited(payload):
+    """Prefer the database or data source edit time over a row or a parent page."""
+    if isinstance(payload, dict):
+        for key in ("page_last_edited_at", "last_edited_time", "last_edited_at", "lastEditedTime"):
+            found = _time_value(payload.get(key))
+            if found:
+                return found
+        for key in ("metadata", "database", "data_source", "page"):
+            if isinstance(payload.get(key), dict):
+                found = _edited(payload[key])
+                if found:
+                    return found
+        text = payload.get("text")
+        if isinstance(text, str):
+            return _edited(text)
+        return ""
+    if isinstance(payload, str):
+        match = _EDIT_ATTR.search(payload)
+        return match.group(1) if match else ""
     return ""
+
+
+def _truthy(value):
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().casefold() in {"true", "yes", "1"}
+
+
+def _trashed(payload):
+    """A database inside a trashed page can still return rows. Do not use them."""
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key.replace("-", "_").casefold() in {"in_trash", "archived", "is_archived"} and _truthy(value):
+                return True
+            if key in {"metadata", "database", "data_source", "page"} and isinstance(value, dict) and _trashed(value):
+                return True
+        text = payload.get("text")
+        return isinstance(text, str) and _trashed(text)
+    if isinstance(payload, str):
+        return _TRASH_ATTR.search(payload) is not None
+    return False
+
+
+def _page_id(settings):
+    configured = ((settings.get("moderation") or {}).get("rulebook") or {}) if isinstance(settings, dict) else {}
+    page_id = configured.get("page_id") or DEFAULT_PAGE_ID
+    if not isinstance(page_id, str) or not DATABASE_ID.fullmatch(page_id.replace("-", "").lower()):
+        raise RulebookError("분류 기준표 Notion 주소가 올바르지 않습니다.")
+    return page_id.replace("-", "").lower()
+
+
+def _optional_fetch(client, identifier):
+    try:
+        return client.call("fetch", {"id": identifier})
+    except PilotError:
+        return None
 
 
 def fetch_rows(client, settings):
     database_id, source = _data_source(settings)
+    page_id = _page_id(settings)
     fetched = client.call("fetch", {"id": database_id})
+    source_fetched = _optional_fetch(client, source)
+    page_fetched = client.call("fetch", {"id": page_id})
+    for payload in (fetched, source_fetched, page_fetched):
+        if payload is not None and _trashed(payload):
+            raise RulebookError("분류 기준표가 휴지통 또는 보관 상태라 사용하지 않습니다.")
     query = 'SELECT "이름", "코드", "결과", "순서", "설명", "예외", "사용" FROM "' + source + '"'
     result = client.call("query-data-sources", {"data": {
         "mode": "sql", "data_source_urls": [source], "query": query, "params": []}})
     if isinstance(result, dict) and (result.get("has_more") or result.get("next_cursor")):
         raise RulebookError("분류 기준표가 한 번에 읽히지 않았습니다.")
+    if isinstance(result, dict) and _trashed({key: value for key, value in result.items() if key != "results"}):
+        raise RulebookError("분류 기준표가 휴지통 또는 보관 상태라 사용하지 않습니다.")
     rows = result.get("results") if isinstance(result, dict) else None
     if not isinstance(rows, list):
         raise RulebookError("분류 기준표 조회 결과가 없습니다.")
-    return rows, _edited(fetched)
+    edited = _edited(fetched) or (_edited(source_fetched) if source_fetched else "") or _edited(page_fetched)
+    if not edited and isinstance(result, dict):
+        edited = _edited({key: value for key, value in result.items() if key != "results"})
+    return rows, edited
 
 
 def _load_cache(state):
