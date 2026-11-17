@@ -50,6 +50,15 @@ class MemoryState:
         names = sorted(name for name in self.data if name.startswith(prefix))
         return [{"name": name, "generation": self.generations[name]} for name in names[:limit]], len(names) > limit
 
+    def list_page(self, prefix, limit=50, page_token=None, start_offset=None):
+        names = sorted(name for name in self.data if name.startswith(prefix))
+        if start_offset:
+            names = [name for name in names if name > start_offset]
+        elif page_token:
+            names = names[int(page_token):]
+        chunk = names[:int(limit)]
+        return [{"name": name, "generation": self.generations[name]} for name in chunk], None
+
 
 class Model:
     def __init__(self, answers):
@@ -1104,6 +1113,143 @@ class HumanDecisionTests(unittest.TestCase):
             apply_human_decisions(sheet, flaky, now=moment, hide_enabled=True)
         self.assertEqual(len(flaky.calls), 3)
         self.assertIn("숨김 실패 (3/3)", sheet.data(REVIEW_TAB)[-1][12])
+
+
+class DecisionIndexTests(unittest.TestCase):
+    def test_each_run_reads_one_page_not_every_decision(self):
+        from sns_comment.moderation import comments_waiting_to_hide, load_rulebook, policy_sha, text_hash
+        state = MemoryState()
+        sha = policy_sha(load_rulebook())
+        text = "index me"
+
+        def store(comment_id, status="kept", confidence="high", human=None, attempts=0):
+            label = "숨김" if status in {"would_hide", "hide_failed"} else "유지"
+            state.json_put(decision_name(ACCOUNT, comment_id), {
+                "account_id": ACCOUNT, "comment_id": comment_id, "text": text, "text_hash": text_hash(text),
+                "policy_sha": sha, "label": label, "rule_id": "D3" if label == "숨김" else "K1",
+                "confidence": confidence, "status": status, "hide_attempts": attempts, "human_decision": human,
+                "written_at": "2026-11-16T01:00:00+00:00", "author_username": "fan",
+            }, 0)
+
+        for comment_id in ("11001", "11002", "11003", "11004"):
+            store(comment_id)
+        store("11009", status="would_hide")
+        pages, reads = [], []
+        original_page, original_get = state.list_page, state.json_get
+
+        def counting_page(prefix, limit=50, page_token=None, start_offset=None):
+            pages.append((limit, start_offset))
+            return original_page(prefix, limit, page_token, start_offset)
+
+        def counting_get(name, default=None):
+            if name.startswith("moderation/decisions/"):
+                reads.append(name)
+            return original_get(name, default)
+
+        state.list_page, state.json_get = counting_page, counting_get
+        self.assertEqual(comments_waiting_to_hide(state, ACCOUNT, sha, page_size=2), [])
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(comments_waiting_to_hide(state, ACCOUNT, sha, page_size=2), [])
+        self.assertEqual(len(reads), 4)
+        found = comments_waiting_to_hide(state, ACCOUNT, sha, page_size=2)
+        self.assertEqual([item["id"] for item in found], ["11009"])
+        self.assertEqual(len(pages), 3)
+        pages.clear()
+        again = comments_waiting_to_hide(state, ACCOUNT, sha, page_size=2)
+        self.assertEqual(pages, [])
+        self.assertEqual([item["id"] for item in again], ["11009"])
+
+    def test_a_new_decision_updates_the_index_and_a_human_keep_is_not_queued(self):
+        from sns_comment.moderation import comments_waiting_to_hide, load_rulebook, pending_hide_name, policy_sha
+        state = MemoryState()
+        sha = policy_sha(load_rulebook())
+        state.json_put(pending_hide_name(ACCOUNT), {"items": {}, "catchup_after": "", "catchup_done": True}, 0)
+        comment = audience("심한 욕", "30091")
+        model = Model({"30091": {**answer("숨김", "D3"), "id": "30091"}})
+        moderate([comment], state, DRY, model, client=Hides(), account_username="waterbomb_toronto_official", region="토론토")
+        self.assertIn("30091", state.data[pending_hide_name(ACCOUNT)]["items"])
+        calls = []
+        state.list_page = lambda *_args, **_kwargs: calls.append("listed") or ([], None)
+        found = comments_waiting_to_hide(state, ACCOUNT, sha)
+        self.assertEqual(calls, [])
+        self.assertEqual([item["id"] for item in found], ["30091"])
+        with mock.patch.dict(os.environ, {"SNS_MODERATION_HIDE": "1"}, clear=False):
+            hidden = moderate([comment], state, AUTO, model, client=Hides(),
+                              account_username="waterbomb_toronto_official", region="토론토")
+        self.assertEqual(hidden["hidden"], 1)
+        self.assertNotIn("30091", state.data[pending_hide_name(ACCOUNT)]["items"])
+        self.assertEqual(comments_waiting_to_hide(state, ACCOUNT, sha), [])
+        kept = audience("유지된 글", "30092")
+        state.json_put(decision_name(ACCOUNT, "30092"), {
+            "account_id": ACCOUNT, "comment_id": "30092", "text": "유지된 글", "label": "숨김",
+            "confidence": "high", "policy_sha": sha, "status": "would_hide", "hide_attempts": 0,
+            "human_decision": "유지", "written_at": "2026-11-16T02:00:00+00:00",
+        }, 0)
+        state.data[pending_hide_name(ACCOUNT)]["items"]["30092"] = {
+            "comment_id": "30092", "status": "would_hide", "label": "숨김", "confidence": "high",
+            "policy_sha": sha, "hide_attempts": 0, "human_decision": None, "written_at": "2026-11-16T02:00:00+00:00",
+        }
+        self.assertEqual(comments_waiting_to_hide(state, ACCOUNT, sha), [])
+        self.assertEqual(state.data[decision_name(ACCOUNT, "30092")]["human_decision"], "유지")
+        self.assertNotIn("30092", state.data[pending_hide_name(ACCOUNT)]["items"])
+
+    def test_repeat_lookup_does_not_list_decisions(self):
+        from sns_comment.moderation import _prior_copies
+        state = MemoryState()
+        state.json_put("moderation/repeat-index/" + ACCOUNT + ".json", {"entries": {"slot": {"comment_id": "1"}}}, 0)
+        for offset in range(30):
+            state.json_put(decision_name(ACCOUNT, str(12000 + offset)), {"comment_id": str(12000 + offset)}, 0)
+        state.list_page = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not list decisions"))
+        entries = _prior_copies(state, ACCOUNT)
+        self.assertEqual(entries["slot"]["comment_id"], "1")
+
+    def test_a_busy_lease_exits_cleanly(self):
+        from sns_comment.cloud_state import CloudError
+        from sns_comment.moderation_job import main
+        stream = io.StringIO()
+        env = {"GOOGLE_CLOUD_PROJECT": "waterbomb-sns-pipeline", "SNS_STATE_BUCKET": "waterbomb-sns-pipeline-state",
+               "SNS_MODERATION_HIDE": "1"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch("sns_comment.moderation_job.CloudState") as created:
+                created.return_value.lease.side_effect = CloudError("다른 클라우드 실행이 진행 중입니다")
+                with mock.patch("sys.stdout", stream):
+                    code = main(["--config", str(ROOT / "config.json")])
+        self.assertEqual(code, 0)
+        self.assertIn("skipped: lease busy", stream.getvalue())
+        self.assertNotIn("UnboundLocalError", stream.getvalue())
+        stream = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch("sns_comment.moderation_job.CloudState") as created:
+                created.return_value.lease.side_effect = CloudError("클라우드 API 요청 실패", 500)
+                with mock.patch("sys.stdout", stream):
+                    code = main(["--config", str(ROOT / "config.json")])
+        self.assertEqual(code, 1)
+        self.assertNotIn("skipped: lease busy", stream.getvalue())
+        self.assertIn("moderation_failed", stream.getvalue())
+
+    def test_poll_phase_is_timed(self):
+        stream = io.StringIO()
+
+        class Api:
+            def get(self, path, **_params):
+                if path.endswith("/media"):
+                    return {"data": []}
+                return {"id": path, "hidden": False, "timestamp": "2026-11-16T01:00:00+00:00", "text": "hi", "username": "fan"}
+
+            def hide_comment(self, _comment_id):
+                raise AssertionError("dry-run must not hide")
+
+        config = {"account_id": ACCOUNT, "expected_username": "waterbomb_toronto_official", "region_label": "토론토"}
+        settings = {**DRY, "moderation": {**DRY["moderation"], "max_age_minutes": 20, "media_limit": 8}}
+        with mock.patch("sys.stdout", stream):
+            sweep_account(config, MemoryState(), Api(), Model({}), settings,
+                          dt.datetime(2026, 11, 16, 2, 0, tzinfo=dt.timezone.utc))
+        phases = [json.loads(line) for line in stream.getvalue().splitlines() if '"moderation_phase"' in line]
+        names = [item["phase"] for item in phases]
+        self.assertIn("poll", names)
+        self.assertIn("account", names)
+        self.assertTrue(all(isinstance(item["seconds"], float) for item in phases))
 
 
 if __name__ == "__main__":

@@ -54,11 +54,17 @@ def comment_from_payload(item, account_id, owner, media_id, parent_id=None, perm
             "permalink": link, "already_hidden": item.get("hidden") is True}
 
 
+def _phase(phase, started, **values):
+    log("moderation_phase", phase=phase, seconds=round(time.perf_counter() - started, 3), **values)
+
+
 def sweep_account(config, state, client, model, settings, now, sheet_client=None):
     from .moderation_polling import Polling
     account_id = config["account_id"]
     owner = config["expected_username"].lstrip("@")
     mod = settings.get("moderation") or {}
+    started = time.perf_counter()
+    mark = started
     polling = Polling(state, account_id, owner, mod, now, comment_from_payload)
     deadline = time.monotonic() + int(mod.get('poll_seconds') or 90)
     polling.webhooks(client, deadline=deadline)
@@ -71,15 +77,25 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     queued = polling.pending(int(mod.get('processing_batch_size') or 40))
     chosen = list(queued)
     seen = {row['id'] for row in chosen}
+    _phase("poll", mark, account=owner, comments=len(queued), status="pending" if polling.error else "complete")
+    promoted = 0
+    mark = time.perf_counter()
     if hiding_enabled(settings):
         book = load_rulebook(mod.get("policy_version"))
         for comment in comments_waiting_to_hide(state, account_id, policy_sha(book)):
             if comment["id"] in seen:
                 continue
             seen.add(comment["id"])
+            promoted += 1
             chosen.append(comment)
+    _phase("promote", mark, account=owner, queued=promoted)
+    mark = time.perf_counter()
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
                       region=config.get("region_label"), sheet_client=sheet_client)
+    _phase("classify", mark, account=owner, classified=result.get("classified") or 0,
+           would_hide=result.get("would_hide") or 0, hidden=result.get("hidden") or 0,
+           human_review=result.get("human_review") or 0, kept=result.get("kept") or 0)
+    _phase("account", started, account=owner, seen=len(seen))
     polling.acknowledge(queued)
     result['coverage'] = polling.coverage()
     if polling.error:
@@ -204,39 +220,57 @@ def fill_notion_written_dates(settings, state, sheet):
 
 
 def run(settings, state, project, now=None):
+    started = time.perf_counter()
+    mark = started
     registry, _ = state.json_get(REGISTRY_OBJECT)
     if not isinstance(registry, dict):
         registry = initial_registry(settings)
     configs = [config for config in runtime_configs(settings, registry) if config.get("account_id")]
+    _phase("registry", mark, accounts=len(configs))
     if not configs:
         log("moderation_idle", reason="활성 계정 없음")
+        _phase("total", started, status="complete")
         return {"status": "complete", "classified": 0, "would_hide": 0, "hidden": 0, "human_review": 0}
+    mark = time.perf_counter()
     token, _name = read_token(state.transport, _reference(settings, configs))
     try:
         client = GraphClient(token, settings["api_version"], max_requests=400,
                              api_host=configs[0].get("_meta_api_host", "graph.facebook.com"))
+        _phase("token", mark, accounts=len(configs))
         model = VertexModerator(state.transport, project, settings.get("cloud", {}).get("ai_model", "gemini-3.8-flash"))
+        mark = time.perf_counter()
         sheet = open_sheet(settings, state)
+        _phase("sheet_open", mark, opened=sheet is not None)
+        mark = time.perf_counter()
         result = sweep(configs, state, client, model, settings, now=now, sheet_client=sheet)
+        _phase("sweep", mark, accounts=len(configs), status=result.get("status"))
         if sheet is not None:
+            mark = time.perf_counter()
             try:
                 flush_sheet_log(state, sheet)
             except PilotError as error:
                 log("moderation_sheet_failed", error=str(error))
+            _phase("sheet_flush", mark)
             notion = None
+            mark = time.perf_counter()
             try:
                 from .notion_moderation import complete_notion_decisions, prepare_notion_decisions
                 notion = prepare_notion_decisions(settings, state, sheet)
             except PilotError as error:
                 log("notion_decision_unavailable", error=str(error))
+            _phase("notion_prepare", mark, opened=notion is not None)
+            mark = time.perf_counter()
             try:
                 from .human_decision import apply_human_decisions
                 decisions = apply_human_decisions(sheet, client, state=state)
                 log("human_decision_scan", updates=decisions["updates"], planned=len(decisions["plans"]))
             except PilotError as error:
                 log("human_decision_failed", error=str(error))
+            _phase("human_decisions", mark)
             if notion is not None:
+                mark = time.perf_counter()
                 complete_notion_decisions(notion, sheet, now=now)
+                _phase("notion_complete", mark)
         revision = registry.get('token_control', {}).get('revision')
         if revision:
             status, generation = state.json_get(STATUS_OBJECT, {})
@@ -247,6 +281,7 @@ def run(settings, state, project, now=None):
                     'stage': '댓글 관리 작업에서 계정 연결 확인' if ready else '댓글 관리 재시도 대기',
                     'moderation_status': result['status'],
                     'checked_at': dt.datetime.now(dt.timezone.utc).isoformat()}, generation)
+        _phase("total", started, status=result.get("status"))
         return result
     finally:
         del token
@@ -327,7 +362,7 @@ def main(argv=None):
                 updates=result.get("updates", 0), markdown=result.get("markdown", ""))
             return 0
         if args.notion_summary:
-            from .cloud_state import NOTION_SUMMARY_LEASE, CloudError, lease_retry
+            from .cloud_state import NOTION_SUMMARY_LEASE, lease_retry
             from .notion_moderation import run_notion_summary
             state = CloudState(os.environ["SNS_STATE_BUCKET"])
             try:
@@ -377,7 +412,7 @@ def main(argv=None):
                 result = run(settings, state, project)
         except CloudError as error:
             if "진행 중" in str(error) or "잠금" in str(error):
-                log("moderation_deferred", reason=str(error))
+                log("moderation_skipped", message="skipped: lease busy", reason=str(error))
                 return 0
             raise
         log("moderation_finished", status=result["status"], classified=result["classified"],
