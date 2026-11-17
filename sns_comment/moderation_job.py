@@ -104,7 +104,8 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     elif (result['status'] == 'complete' and (result['coverage']['queued'] or
           not result['coverage']['recent_complete'] or not result['coverage']['catalog_complete'])):
         result['status'] = 'pending'
-    log('moderation_coverage', account=owner, status=result['status'], **result['coverage'])
+    log('moderation_coverage', account=owner, status=result['status'],
+        error=result.get('poll_error'), **result['coverage'])
     result["account"] = owner
     result["seen"] = len(seen)
     return result
@@ -121,6 +122,7 @@ def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
         try:
             results.append(sweep_account(config, state, client, model, settings, moment, sheet_client=sheet_client))
         except PilotError as error:
+            log('moderation_account_failed', account=config.get('expected_username'), error=str(error))
             results.append({"account": config.get("expected_username"), "status": "failed", "error": str(error),
                             "classified": 0, "would_hide": 0, "hidden": 0, "human_review": 0})
     status = "complete"
