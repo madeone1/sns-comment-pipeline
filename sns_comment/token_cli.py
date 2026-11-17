@@ -87,11 +87,9 @@ def wait_for_delivery(transport,state,execution,region,revision,timeout=3600):
             print('진행: '+value.get('stage','갱신 작업 시작 대기'),flush=True);previous=value.get('stage')
         status=json.loads(transport.gcloud(['run','jobs','executions','describe',execution,'--region='+region,'--format=json']))['status']
         if status.get('completionTime'):
-            if value.get('status')=='synced':
-                print('계정·지역과 시트·노션 보고의 연결을 재조회해 확인했습니다.',flush=True)
-                for row in value.get('delivery',[]):
-                    print('  '+row['label']+' · 시트 '+row['sheets']+' · 노션 '+row['notion'],flush=True)
-                if value.get('collection_status')!='complete':print('수집 미확인 범위는 잠정 상태로 표시했습니다. 전체 수집 완료와는 구분합니다.',flush=True)
+            if value.get('status')=='ready':
+                print('댓글 관리 작업에서 새 계정·지역 연결을 확인했습니다.',flush=True)
+                print('대기 댓글은 30분 작업에서 이어서 처리합니다.',flush=True)
                 return value
             raise PilotError('갱신 작업에 확인 대기 단계가 있습니다. 검증된 연결과 기존 원본은 보존했습니다. 같은 파일의 --status로 확인해주세요.')
         time.sleep(10)
@@ -100,10 +98,10 @@ def wait_for_delivery(transport,state,execution,region,revision,timeout=3600):
 
 def main(argv=None):
     configure_stdio()
-    parser=argparse.ArgumentParser(description='액세스 토큰 검증 → 계정·지역 연결 → 시트·노션 갱신')
+    parser=argparse.ArgumentParser(description='액세스 토큰 검증 → 계정·지역 연결 → 댓글 관리 갱신')
     parser.add_argument('--config');parser.add_argument('--check',action='store_true',help='현재 저장 토큰을 검증, 저장·수집 실행 없음')
     parser.add_argument('--account',help='Google Cloud 계정(이메일). 없으면 SNS_GCLOUD_ACCOUNT, 그다음 cloud.account, 없으면 현재 활성 계정')
-    parser.add_argument('--status',action='store_true',help='현재 연결과 시트·노션 반영 상태 조회')
+    parser.add_argument('--status',action='store_true',help='현재 연결과 댓글 관리 반영 상태 조회')
     parser.add_argument('--no-wait',action='store_true',help='갱신 작업을 시작한 뒤 종료')
     parser.add_argument('--adopt-current',action='store_true',help='기존 토큰의 검증된 계정 연결만 초기 등록')
     parser.add_argument('--region',action='append',default=[],metavar='ID=지역',help='새 계정의 지역 표시명 지정')
@@ -121,8 +119,11 @@ def main(argv=None):
             else:
                 print(status.get('stage',status.get('status','아직 연결 확인 전')))
                 if status.get('error'):print(status['error'])
-                for row in status.get('delivery',status.get('accounts',[])):
-                    print(row.get('label',row.get('username',''))+' · 시트 '+row.get('sheets','확인 대기')+' · 노션 '+row.get('notion','확인 대기'))
+                for row in status.get('accounts',[]):
+                    print(row.get('label',row.get('username',''))+' · 댓글 관리 '+
+                          ('연결 확인' if status.get('status')=='ready' else '확인 대기'))
+                if status.get('delivery'):
+                    print('이전 daily의 전달 이력입니다. 현재 댓글 관리 확인은 다음 작업 후 갱신됩니다.')
             return 0
         registry,_=state.json_get(REGISTRY_OBJECT,initial_registry(settings))
         stored,base_reference=read_token(transport,source_secret(settings)+'/versions/latest',validate=args.check or args.adopt_current)
@@ -160,9 +161,9 @@ def main(argv=None):
         del token
         if args.adopt_current:
             print('기존 토큰과 계정 이력을 유지한 채 검증된 연결을 등록했습니다.');return 0
-        print('토큰 검증과 계정·지역 연결을 저장했습니다. 시트·노션 갱신을 시작합니다.',flush=True)
+        print('토큰 검증과 계정·지역 연결을 저장했습니다. 댓글 관리 갱신을 시작합니다.',flush=True)
         region=settings['cloud'].get('region','asia-northeast3')
-        execution=transport.gcloud(['run','jobs','execute','sns-comments-daily','--region='+region,'--async','--format=value(metadata.name)']).strip()
+        execution=transport.gcloud(['run','jobs','execute','sns-comments-moderate','--region='+region,'--async','--format=value(metadata.name)']).strip()
         print('갱신 실행: '+execution,flush=True)
         if not args.no_wait:wait_for_delivery(transport,state,execution,region,status['revision'])
         return 0

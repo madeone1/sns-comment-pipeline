@@ -515,6 +515,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if settings.get('cloud', {}).get('daily_enabled') is False and not args.merge_only:
+            log('daily_retired', message='기존 Instagram daily 수집·분석 보고는 종료됐습니다.')
+            return 0
         configs = None if args.all_accounts else [load(args.config,args.account)]
         project = os.environ["GOOGLE_CLOUD_PROJECT"]
         shared = CloudState(os.environ["SNS_STATE_BUCKET"])

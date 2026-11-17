@@ -118,7 +118,7 @@ def _confidence(record):
 def _note(record, hide_tab):
     when = _clock(record.get("updated_at") or record.get("classified_at"))
     if hide_tab:
-        text = (when + " KST 자동 감지(10분 작업)").strip()
+        text = (when + " KST 자동 감지(30분 작업)").strip()
         if record.get("status") == "hidden" and record.get("hidden_check"):
             text += " " + str(record["hidden_check"])
         if record.get("status") == "hide_failed" and record.get("error"):
