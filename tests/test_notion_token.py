@@ -243,9 +243,11 @@ class NotionTokenTests(unittest.TestCase):
     def test_cloud_ignores_diagnostic_token_and_keeps_existing_account_oauth(self):
         state = mock.MagicMock()
         output = io.StringIO()
+        legacy_settings = cloud.read_settings()
+        legacy_settings['cloud']['daily_enabled'] = True
         environment = {"GOOGLE_CLOUD_PROJECT": "synthetic-project", "SNS_STATE_BUCKET": "synthetic-bucket",
                        "SNS_NOTION_OAUTH_SECRET": "projects/synthetic/secrets/notion", notion_token.TOKEN_ENV: TOKEN}
-        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState", return_value=state), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "McpClient") as client, mock.patch.object(cloud, "NotionMcpClient"), mock.patch.object(cloud, "Analyzer"), mock.patch.object(cloud, "execute", return_value={"status":"complete"}) as execute, contextlib.redirect_stdout(output):
+        with mock.patch.object(cloud, "read_settings", return_value=legacy_settings), mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState", return_value=state), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "McpClient") as client, mock.patch.object(cloud, "NotionMcpClient"), mock.patch.object(cloud, "Analyzer"), mock.patch.object(cloud, "execute", return_value={"status":"complete"}) as execute, contextlib.redirect_stdout(output):
             self.assertEqual(cloud.main([]), 0)
             oauth.return_value.refresh.assert_called_once()
             self.assertIs(client.call_args.args[0], oauth.return_value)
@@ -253,15 +255,19 @@ class NotionTokenTests(unittest.TestCase):
         self.assertNotIn(TOKEN, output.getvalue())
 
     def test_empty_explicit_cloud_token_fails_without_oauth_fallback_or_collection(self):
+        legacy_settings = cloud.read_settings()
+        legacy_settings['cloud']['daily_enabled'] = True
         environment = {"GOOGLE_CLOUD_PROJECT": "synthetic-project", "SNS_STATE_BUCKET": "synthetic-bucket", notion_token.TOKEN_ENV: ""}
-        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState"), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "execute") as execute, contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(cloud, "read_settings", return_value=legacy_settings), mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState"), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "execute") as execute, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cloud.main([]), 1)
             oauth.assert_not_called()
             execute.assert_not_called()
 
     def test_existing_cloud_oauth_path_still_refreshes_once(self):
+        legacy_settings = cloud.read_settings()
+        legacy_settings['cloud']['daily_enabled'] = True
         environment = {"GOOGLE_CLOUD_PROJECT": "synthetic-project", "SNS_STATE_BUCKET": "synthetic-bucket", "SNS_NOTION_OAUTH_SECRET": "projects/synthetic/secrets/notion"}
-        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState"), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "McpClient"), mock.patch.object(cloud, "NotionMcpClient"), mock.patch.object(cloud, "Analyzer"), mock.patch.object(cloud, "execute", return_value={"status":"complete"}), contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(cloud, "read_settings", return_value=legacy_settings), mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(cloud, "CloudState"), mock.patch.object(cloud, "cloud_credentials") as oauth, mock.patch.object(cloud, "McpClient"), mock.patch.object(cloud, "NotionMcpClient"), mock.patch.object(cloud, "Analyzer"), mock.patch.object(cloud, "execute", return_value={"status":"complete"}), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cloud.main([]), 0)
             oauth.return_value.refresh.assert_called_once()
 

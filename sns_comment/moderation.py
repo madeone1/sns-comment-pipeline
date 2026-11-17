@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import unicodedata
 
 from .api import GraphError, PilotError
@@ -247,18 +248,13 @@ def _merge_copy(entries, record):
 
 
 def _prior_copies(state, account_id):
-    """Earlier copies of the same author and text, including decisions saved on previous runs."""
+    """Earlier copies already stored in the repeat index. Do not list decision objects."""
+    started = time.perf_counter()
     name = "moderation/repeat-index/" + account_id + ".json"
-    current, generation = state.json_get(name, {"entries": {}})
+    current, _generation = state.json_get(name, {"entries": {}})
     entries = dict(current.get("entries") or {}) if isinstance(current, dict) else {}
-    changed = False
-    objects, _ = state.list_objects("moderation/decisions/" + account_id + "/", 200)
-    for obj in objects:
-        record, _gen = state.json_get(obj["name"])
-        if isinstance(record, dict) and _merge_copy(entries, record):
-            changed = True
-    if changed:
-        _put(state, name, {"entries": entries}, generation)
+    _log("moderation_phase", phase="repeat_index", account=account_id,
+         seconds=round(time.perf_counter() - started, 3), entries=len(entries))
     return entries
 
 
@@ -279,6 +275,120 @@ def _remember_copies(state, records):
             changed = _merge_copy(entries, record) or changed
         if changed:
             _put(state, name, current, generation)
+
+
+PENDING_CATCHUP = 30
+
+
+def pending_hide_name(account_id):
+    return "moderation/pending-hides/" + account_id + ".json"
+
+
+def _blank_pending():
+    return {"items": {}, "catchup_after": "", "catchup_done": False}
+
+
+def _load_pending(state, account_id):
+    current, generation = state.json_get(pending_hide_name(account_id), None)
+    if not isinstance(current, dict):
+        current = _blank_pending()
+    if not isinstance(current.get("items"), dict):
+        current["items"] = {}
+    return current, generation
+
+
+def _pending_snapshot(record):
+    return {
+        "comment_id": record.get("comment_id"),
+        "status": record.get("status"),
+        "label": record.get("label"),
+        "confidence": record.get("confidence"),
+        "policy_sha": record.get("policy_sha"),
+        "hide_attempts": int(record.get("hide_attempts") or 0),
+        "human_decision": record.get("human_decision"),
+        "source": record.get("source"),
+        "written_at": record.get("written_at") if isinstance(record.get("written_at"), str) else "",
+    }
+
+
+def _still_pending(record, sha):
+    if not isinstance(record, dict) or record.get("status") not in {"would_hide", "hide_failed"}:
+        return False
+    if record.get("label") != HIDE_LABEL or record.get("confidence") != "high" or record.get("policy_sha") != sha:
+        return False
+    if _human_kept(record) or int(record.get("hide_attempts") or 0) >= 3:
+        return False
+    comment_id = record.get("comment_id")
+    return isinstance(comment_id, str) and comment_id.isdigit()
+
+
+def remember_pending(state, records):
+    """Keep the small hide queue in step with decisions this run just saved."""
+    grouped = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        account_id = record.get("account_id")
+        comment_id = record.get("comment_id")
+        if isinstance(account_id, str) and isinstance(comment_id, str):
+            grouped.setdefault(account_id, []).append(record)
+    for account_id, group in grouped.items():
+        current, generation = _load_pending(state, account_id)
+        items = current["items"]
+        changed = False
+        for record in group:
+            comment_id = record["comment_id"]
+            if _still_pending(record, record.get("policy_sha")):
+                snap = _pending_snapshot(record)
+                if items.get(comment_id) != snap:
+                    items[comment_id] = snap
+                    changed = True
+            elif comment_id in items:
+                items.pop(comment_id, None)
+                changed = True
+        if changed:
+            _put(state, pending_hide_name(account_id), current, generation)
+
+
+def _decision_page(state, prefix, after, limit):
+    if not hasattr(state, "list_page"):
+        raise PilotError("결정 목록은 한 페이지씩만 읽습니다.")
+    return state.list_page(prefix, limit, start_offset=after or None)
+
+
+def _catchup_pending(state, account_id, current, generation, limit):
+    """Read one page of older decisions into the pending index. Never the whole set."""
+    started = time.perf_counter()
+    after = current.get("catchup_after") or None
+    page, _token = _decision_page(state, "moderation/decisions/" + account_id + "/", after, limit)
+    read = 0
+    items = current["items"]
+    last = after
+    for obj in page:
+        name = obj.get("name") if isinstance(obj, dict) else None
+        if not isinstance(name, str) or not name.endswith(".json") or (after and name <= after):
+            continue
+        last = name
+        record, _gen = state.json_get(name)
+        read += 1
+        if not isinstance(record, dict):
+            continue
+        comment_id = record.get("comment_id")
+        if not isinstance(comment_id, str):
+            continue
+        if _still_pending(record, record.get("policy_sha")):
+            items[comment_id] = _pending_snapshot(record)
+        else:
+            items.pop(comment_id, None)
+    if isinstance(last, str) and last and last != after:
+        current["catchup_after"] = last
+        current["catchup_done"] = len(page) < limit
+    else:
+        current["catchup_done"] = True
+    _put(state, pending_hide_name(account_id), current, generation)
+    _log("moderation_phase", phase="pending_catchup", account=account_id,
+         seconds=round(time.perf_counter() - started, 3), read=read, done=current["catchup_done"])
+    return current, read
 
 
 def hiding_enabled(settings):
@@ -517,46 +627,59 @@ def _put(state, name, value, generation):
         return state.json_put(name, value, generation)
 
 
-def comments_waiting_to_hide(state, account_id, sha):
+def _comment_from_decision(record, account_id):
+    comment_id = record.get("comment_id")
+    return {
+        "id": comment_id, "account_id": account_id, "text": record.get("text"),
+        "written_at": record.get("written_at") if isinstance(record.get("written_at"), str) else "",
+        "username": record.get("author_username") if isinstance(record.get("author_username"), str) else None,
+        "author_id": record.get("author_id") if isinstance(record.get("author_id"), str) else None,
+        "media_id": record.get("media_id") if isinstance(record.get("media_id"), str) else None,
+        "permalink": record.get("permalink") if isinstance(record.get("permalink"), str) else None,
+        "parent_id": record.get("parent_id") if isinstance(record.get("parent_id"), str) else None,
+        "is_owner": 0,
+    }
+
+
+def comments_waiting_to_hide(state, account_id, sha, page_size=None):
     """Stored high-confidence 숨김 rows the 10-minute job can still hide.
 
     The poll window is short, so a would_hide saved earlier is included on the next
     run. A human 유지, a low-confidence row, and a third failure stay out.
+    The queue is one index object. Older decisions are folded in one page per run,
+    not by reading every saved decision again.
     """
-    prefix = "moderation/decisions/" + account_id + "/"
-    if hasattr(state, "list_all"):
-        objects = state.list_all(prefix)
-    else:
-        objects, _more = state.list_objects(prefix, 500)
-    waiting = []
-    for obj in objects:
-        name = obj.get("name") if isinstance(obj, dict) else None
-        if not isinstance(name, str):
+    started = time.perf_counter()
+    limit = PENDING_CATCHUP if page_size is None else int(page_size)
+    current, generation = _load_pending(state, account_id)
+    catchup_read = 0
+    if not current.get("catchup_done"):
+        current, catchup_read = _catchup_pending(state, account_id, current, generation, limit)
+    ranked = [snap for snap in current["items"].values() if _still_pending(snap, sha)]
+    ranked.sort(key=lambda item: (item.get("written_at") or "", item.get("comment_id") or ""), reverse=True)
+    waiting, stale = [], []
+    lookups = 0
+    for snap in ranked[:40]:
+        record, _gen = state.json_get(decision_name(account_id, snap["comment_id"]))
+        lookups += 1
+        if not isinstance(record, dict) or not _still_pending(record, sha):
+            stale.append(snap["comment_id"])
             continue
-        record, _generation = state.json_get(name)
-        if not isinstance(record, dict) or record.get("status") not in {"would_hide", "hide_failed"}:
-            continue
-        if (record.get("label") != HIDE_LABEL or record.get("confidence") != "high"
-                or record.get("policy_sha") != sha or _human_kept(record)):
-            continue
-        if int(record.get("hide_attempts") or 0) >= 3:
-            continue
-        comment_id = record.get("comment_id")
         text = record.get("text")
-        if not isinstance(comment_id, str) or not comment_id.isdigit() or not isinstance(text, str) or not text:
+        if not isinstance(text, str) or not text:
+            stale.append(snap["comment_id"])
             continue
-        waiting.append({
-            "id": comment_id, "account_id": account_id, "text": text,
-            "written_at": record.get("written_at") if isinstance(record.get("written_at"), str) else "",
-            "username": record.get("author_username") if isinstance(record.get("author_username"), str) else None,
-            "author_id": record.get("author_id") if isinstance(record.get("author_id"), str) else None,
-            "media_id": record.get("media_id") if isinstance(record.get("media_id"), str) else None,
-            "permalink": record.get("permalink") if isinstance(record.get("permalink"), str) else None,
-            "parent_id": record.get("parent_id") if isinstance(record.get("parent_id"), str) else None,
-            "is_owner": 0,
-        })
-    waiting.sort(key=lambda comment: (comment.get("written_at") or "", comment["id"]), reverse=True)
-    return waiting[:40]
+        waiting.append(_comment_from_decision(record, account_id))
+    if stale:
+        fresh, generation = _load_pending(state, account_id)
+        for comment_id in stale:
+            fresh["items"].pop(comment_id, None)
+        _put(state, pending_hide_name(account_id), fresh, generation)
+    _log("moderation_phase", phase="pending_hides", account=account_id,
+         seconds=round(time.perf_counter() - started, 3), indexed=len(current.get("items") or {}),
+         queued=len(waiting), catchup_read=catchup_read, lookups=lookups,
+         catchup_done=bool(current.get("catchup_done")))
+    return waiting
 
 
 def _pending_hide(existing, comment, sha, settings):
@@ -760,6 +883,7 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         written.append(record)
     if written:
         _remember_copies(state, written)
+        remember_pending(state, written)
     if written or summary["usage"]["calls"]:
         _store_daily(state, written, summary["usage"])
     sheet_records.extend(record for record in written if _has_written_at(record))

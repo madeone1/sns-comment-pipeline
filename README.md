@@ -1,21 +1,24 @@
 # SNS Comment Pipeline
 
-액세스 토큰으로 접근 가능한 Instagram 계정을 검증하고, 지역별 댓글을 수집·분석해
-Google Sheets와 Notion 일일 업무에 반영하는 MadeOne 내부 자동화다.
+Instagram 댓글을 30분마다 수집·분류하고, 규정집 v2.3에 따라 숨김 또는
+사람 판단으로 처리하는 MadeOne 내부 자동화다. 평일 09시에는 Notion 일일 업무의
+Develop 구역에 댓글 관리 요약을 게시한다.
 
-별도 관리 웹사이트는 사용하지 않는다. 토큰 변경은 포함된 macOS 실행 파일에서
-진행하고, 실제 수집·분석·갱신은 기존 Google Cloud 작업에서 수행한다.
+2026-11-17부터 기존 08시 `sns-comments-daily` 수집·분석·SNS Comments 보고는
+종료한다. 원본 시트의 전체 댓글 누적 갱신도 이 작업과 함께 종료하며 기존 원본,
+검수 입력, 보고서는 보존한다. 관리용 기준표 시트와 09시 요약은 계속 갱신한다.
+별도 관리 웹사이트는 사용하지 않는다.
 
 ```mermaid
 flowchart LR
-    A[로컬 토큰 숨김 입력] --> B[계정·지역 API 검증]
-    B --> C[Secret Manager / 계정 등록부]
-    C --> D[Cloud Run 수집·분석 작업]
-    E[매일 08:00 KST 예약] --> D
-    D --> F[지역별 Google Sheets 탭]
-    D --> G[Notion 일일 업무]
-    F --> H[실제 출력 재조회·검증]
-    G --> H
+    A[Meta 웹훅 알림] --> C[댓글 관리: 30분마다]
+    B[API 조회·과거 게시물 순회] --> C
+    C --> D[Cloud Storage 원문 대기열·판단]
+    D --> E[숨김·유지·사람 판단]
+    E --> F[기준표 시트]
+    F --> G[Notion 사람 판단 표]
+    G --> E
+    F --> H[평일 09시 댓글 관리 요약]
 ```
 
 ## 토큰 변경
@@ -72,24 +75,29 @@ Python이나 Google Cloud CLI가 없으면 설치 링크를 한글로 보여 주
 다시 로그인하라고 안내한다.
 
 토큰은 표시되지 않는 입력란에 붙여 넣는다. 검증된 새 계정에만 지역 표시명을
-한 번 지정한다. 저장 직후 클라우드 갱신 작업을 시작하며, 이후 매일 08시 작업에도
+한 번 지정한다. 저장 직후 댓글 관리 작업을 시작하며, 이후 30분 댓글 관리 작업에도
 계속 반영된다. 이미 시작한 클라우드 작업은 로컬 창을 닫아도 계속된다.
 
 ```bat
 change-access-token.bat --status
 ```
 
-A·B·C에서 A·D·E로 바뀌면 A의 이력을 유지하고, B·C의 시트 탭은 숨김 보관한다.
-D·E는 계정 ID에 따라 새 탭을 만들며, Notion 현재 요약은 A·D·E를 사용한다.
-검증 실패·미등록 지역·수집 미확인은 정상 0건으로 처리하지 않는다.
-자세한 동작은 [TOKEN-CONNECTIONS.md](TOKEN-CONNECTIONS.md)를 따른다.
+토큰에서 확인한 계정 ID와 지역 표시명을 관리 작업이 사용한다. 이전 원본 시트와
+계정별 수집 이력은 보존하며, 종료한 원본 시트 투영·SNS Comments 보고를 다시
+실행하지 않는다. 자세한 동작은 [TOKEN-CONNECTIONS.md](TOKEN-CONNECTIONS.md)를 따른다.
 
-## 보고 기준
+## 조회와 복구
 
-매 분석·갱신 시 채택된 Notion 참조 문서를 다시 읽고 버전·수정 시각·내용 지문을
-확인한다. Notion의 `SNS Comments`는 일반 제목이며, 아래 지역별 항목은 토글이다.
-사람이 작성한 시트 값과 기존 댓글 근거·제외 계정의 과거 보고를 보존한다.
-[WORKFLOW.md](WORKFLOW.md), [DAILY_MERGE.md](DAILY_MERGE.md)에 상세 동작이 있다.
+30분 예약에 대해 최소 최근 60분을 겹쳐 조회한다. 마지막으로 끝낸 조회 시각보다
+실행이 늦으면 그 시각부터 다시 확인한다. 댓글·답글 페이지와 전체 게시물 목록은
+커서를 저장하며, 요청 제한이나 실행 중단 시 같은 페이지부터 이어간다. 최신
+게시물 첫 페이지는 긴 순회가 진행 중이어도 매번 새로 확인한다.
+
+조회한 원문은 분류 전에 `moderation/polling/계정ID.json`에 저장한다. 한 번의 처리
+상한을 넘은 댓글도 대기열에 남으며, 이미 반영한 댓글 ID·본문·규정 지문은 중복
+처리하지 않는다. 웹훅 원본은 보존하고 수신 객체 버전별 처리 여부를 기록한다.
+과거 게시물의 전체 순회는 여러 실행에 걸칠 수 있다. API가 제공하지 않는 본문이나
+접근 불가 객체는 전체 확인 완료로 표시하지 않는다.
 
 ## 코드 구성
 
@@ -100,16 +108,18 @@ D·E는 계정 ID에 따라 새 탭을 만들며, Notion 현재 요약은 A·D·
 | `sns_comment/token_cli.py` | 숨김 입력, 검증, 클라우드 연결·작업 시작 |
 | `sns_comment/token_connections.py` | 인증 버전별 계정 스냅샷, 지역 매핑, 출력 검증 |
 | `sns_comment/connection_registry.py` | 계정 ID별 경로·지역·이력 |
-| `sns_comment/cloud.py` | 수집·분석·시트·Notion 운영 작업 |
+| `sns_comment/moderation_job.py`, `moderation_polling.py` | 30분 댓글 관리·원문 대기열·페이지 복구 |
+| `sns_comment/notion_moderation.py` | 평일 09시 요약과 사람 판단 동기화 |
+| `sns_comment/cloud.py` | 종료한 daily 호환 코드. 현재 설정에서는 실행하지 않음 |
 | `sns_comment/account_tabs.py` | 계정별 시트 탭과 과거 이력 보관 |
 | `sns_comment/notion_mcp.py`, `regional_notion.py`, `guidance.py` | 최신 지침, 일반 제목·지역 토글, 보고 보존 |
 | `sns_comment/webhook.py`, `webhook_worker.py` | Meta 댓글 웹훅 수신·후속 처리 |
 | `Dockerfile`, `Dockerfile.webhook` | 수집기와 웹훅 수신기 컨테이너 |
-| `scripts/token_connection_release.py` | 현재 수집기 준비·빌드·검증·배포 |
+| `scripts/token_connection_release.py` | 댓글 관리·요약 준비·빌드·읽기 검증·배포 |
 | `scripts/webhook_release.py`, `webhook_connect.py` | 웹훅 수신기 배포·연결 |
 | `scripts/legacy/`, `docs/history/` | 과거 클라우드 배포·검증 코드와 기록 |
 | `tests/` | 합성 API와 시트·Notion 모형을 이용한 자동 검증 |
-| `config.json` | 현재 운영 설정의 기준 사본. 토큰값은 없음 |
+| `config.json` | 현재 댓글 관리 설정의 기준 사본. 토큰값은 없음 |
 
 기존 로컬 수집·진단·Notion 초기 연결용 `.command` 파일도 포함한다.
 `connect-accounts.command`는 과거 로컬 Keychain 연결용이며, 현재 클라우드의
