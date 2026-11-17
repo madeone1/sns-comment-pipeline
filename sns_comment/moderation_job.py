@@ -91,7 +91,8 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     _phase("promote", mark, account=owner, queued=promoted)
     mark = time.perf_counter()
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
-                      region=config.get("region_label"), sheet_client=sheet_client, book=book)
+                      region=config.get("region_label"), sheet_client=sheet_client, book=book,
+                      known_comments=list(polling.data.get("queue", {}).values()))
     _phase("classify", mark, account=owner, classified=result.get("classified") or 0,
            would_hide=result.get("would_hide") or 0, hidden=result.get("hidden") or 0,
            human_review=result.get("human_review") or 0, kept=result.get("kept") or 0)
@@ -316,10 +317,49 @@ def main(argv=None):
     parser.add_argument("--rewrite-toggle", action="store_true", help="오늘 댓글 관리 토글을 짧은 배치로 다시 씁니다. 기본은 미리보기입니다.")
     parser.add_argument("--sort-sheet", action="store_true", help="기준표 데이터 행을 댓글 작성일 내림차순으로 정렬합니다. 기본은 미리보기입니다.")
     parser.add_argument("--fill-missing-dates", action="store_true", help="C열이 비어 있는 행의 인스타 작성 시각을 읽고, 반영 시 그 시각으로 다시 정렬합니다. 기본은 미리보기입니다.")
-    parser.add_argument("--apply", action="store_true", help="--sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
+    parser.add_argument("--author-cap", action="store_true",
+                        help="한 사람이 한 게시물에 쓴 댓글·답글이 3개째부터 숨깁니다. 기본은 미리보기입니다.")
+    parser.add_argument("--apply", action="store_true",
+                        help="--author-cap, --sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
+        if args.author_cap:
+            from .author_cap import author_cap_enabled, sweep_author_cap
+            from .rulebook_source import resolve_rulebook, rulebook_source
+            state = CloudState(os.environ["SNS_STATE_BUCKET"])
+            notion_mcp = None
+            if rulebook_source(settings) == "notion":
+                try:
+                    from .notion_moderation import _open_locked
+                    opened = _open_locked(settings, state)
+                    notion_mcp = opened[0] if opened else None
+                except PilotError as error:
+                    log("moderation_rulebook_unavailable", error=str(error))
+            book = resolve_rulebook(settings, state, notion_mcp)
+            if not author_cap_enabled(book):
+                log("author_cap_inactive", severity="WARNING",
+                    message="D12가 사용 중이 아니라 한 게시물 2개 제한을 적용하지 않습니다.")
+                return 0
+            sheet = open_sheet(settings, state) if args.apply else None
+            clients = account_clients(settings, state)
+            registry, _generation = state.json_get(REGISTRY_OBJECT)
+            if not isinstance(registry, dict):
+                registry = initial_registry(settings)
+            configs = [config for config in runtime_configs(settings, registry) if config.get("account_id")]
+            try:
+                from .cloud_state import MODERATION_LEASE
+                with state.lease(1620, MODERATION_LEASE):
+                    result = sweep_author_cap(configs, state, clients, settings, sheet, book, args.apply)
+            except CloudError as error:
+                if "진행 중" in str(error) or "잠금" in str(error):
+                    log("moderation_skipped", message="skipped: lease busy", reason=str(error))
+                    return 0
+                raise
+            log("author_cap_finished", **{key: value for key, value in result.items() if key != "accounts"})
+            for item in result["accounts"]:
+                log("author_cap_account", **item)
+            return 0
         if args.fill_missing_dates:
             from .moderation_sheet import fill_missing_dates
             state = CloudState(os.environ["SNS_STATE_BUCKET"])

@@ -69,6 +69,8 @@ def prompt_for(book):
     lines.append("각 댓글은 id, label, rule_id, reason, confidence를 가진 JSON 배열로만 반환한다. confidence는 high 또는 low다.")
     lines.append("reason은 40자 안팎의 한국어다. 이모지는 뜻 없는 것으로 보고 글자만 본다. 이모지만 있으면 K1이다.")
     lines.append("D11은 같은 작성자가 같은 글을 다시 올린 경우만이다. 다른 작성자가 같은 글을 한 번씩 쓴 것은 유지다. 공백을 접고 대소문자만 무시한 완전 일치를 본다.")
+    if any(isinstance(rule, dict) and rule.get("id") == "D12" for rule in book.get("rules") or []):
+        lines.append("D12는 같은 작성자가 같은 게시물에 쓴 댓글과 답글이 3개째부터 숨김이다. 공식 계정도 예외가 아니다. K3은 그 작성자의 처음 2개에만 적용한다.")
     for rule in book["rules"]:
         lines.append(f"{rule['id']} {rule['label']} {rule['name']}: {rule['definition']} 예외: {rule['exceptions']}")
     return "\n".join(lines)
@@ -186,12 +188,17 @@ def _repeat_choice(earlier, decided):
     return _decision(HIDE_LABEL, "D11", "같은 작성자의 반복입니다.", "high", "guard")
 
 
-def classify_comments(comments, model, book, batch_size=20, prior=None):
+def classify_comments(comments, model, book, batch_size=20, prior=None, earlier_posts=None):
     """Apply guard order, then one model batch for the rest. Same-author repeats do not call the model again."""
+    from .author_cap import author_cap_enabled, author_ranks, cap_choice
     prior = prior or {}
     ordered = sorted(comments, key=lambda row: (str(row.get("written_at") or ""), str(row.get("id") or "")))
+    ranks = author_ranks(ordered, earlier_posts) if author_cap_enabled(book) else {}
     decided, pending = {}, []
     for comment in ordered:
+        if ranks.get(comment.get("id"), 1) > 2:
+            decided[comment["id"]] = cap_choice()
+            continue
         choice = guard(comment)
         if choice is not None:
             decided[comment["id"]] = choice
@@ -767,7 +774,7 @@ def _hidden_check(client, comment_id):
     return "hidden 확인 실패"
 
 
-def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None, book=None):
+def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None, book=None, known_comments=None):
     """Record every decision. POST hide=true only for a high-confidence 숨김 when hiding is enabled."""
     mod = settings.get("moderation") or {}
     if mod.get("mode", "dry_run") == "off":
@@ -815,7 +822,9 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         prior = {}
         for account_id in {comment["account_id"] for comment in classify}:
             prior.update(_prior_copies(state, account_id))
-        decided, usage = classify_comments(classify, model, book, size, prior=prior)
+        from .author_cap import posts_for_accounts
+        earlier_posts = posts_for_accounts(state, {comment["account_id"] for comment in classify}, known_comments)
+        decided, usage = classify_comments(classify, model, book, size, prior=prior, earlier_posts=earlier_posts)
         for key, value in usage.items():
             summary["usage"][key] += value
         for comment in classify:
@@ -887,6 +896,8 @@ def moderate(comments, state, settings, model, client=None, account_username="",
     if written:
         _remember_copies(state, written)
         remember_pending(state, written)
+    from .author_cap import remember_author_posts
+    remember_author_posts(state, list(comments or []) + list(known_comments or []))
     if written or summary["usage"]["calls"]:
         _store_daily(state, written, summary["usage"])
     sheet_records.extend(record for record in written if _has_written_at(record))
