@@ -9,7 +9,8 @@ from unittest import mock
 from sns_comment.api import PilotError
 from sns_comment.moderation import load_rulebook, moderate, policy_sha
 from sns_comment.moderation_sheet import _note
-from sns_comment.rulebook_source import RulebookError, build_rulebook, resolve_rulebook
+from sns_comment.rulebook_source import (
+    DEFAULT_DATABASE_ID, DEFAULT_DATA_SOURCE, DEFAULT_PAGE_ID, RulebookError, build_rulebook, resolve_rulebook)
 
 
 ACCOUNT = "17841454752492067"
@@ -35,14 +36,16 @@ class MemoryState:
 
 
 class Notion:
-    def __init__(self, rows, edited=EDITED, error=None):
-        self.rows, self.edited, self.error, self.calls = rows, edited, error, []
+    def __init__(self, rows, edited=EDITED, error=None, fetches=None):
+        self.rows, self.edited, self.error, self.fetches, self.calls = rows, edited, error, fetches or {}, []
 
     def call(self, suffix, arguments):
         self.calls.append(suffix)
-        if self.error:
+        if self.error and not self.fetches:
             raise self.error
         if suffix == "fetch":
+            if arguments["id"] in self.fetches:
+                return self.fetches[arguments["id"]]
             return {"last_edited_time": self.edited, "id": arguments["id"]}
         if suffix == "query-data-sources":
             return {"results": self.rows}
@@ -156,6 +159,68 @@ class FallbackTests(unittest.TestCase):
         self.assertTrue(book["policy_ref"].startswith("file:v2.3:"))
         self.assertEqual(events[-1]["source"], "file")
         self.assertNotIn("severity", events[-1])
+
+    def test_a_trashed_database_is_a_failed_fetch_even_when_rows_come_back(self):
+        settings = {"moderation": {"rulebook": {"source": "notion"}}}
+        fetches = {
+            DEFAULT_DATABASE_ID: {"text": '<database in-trash="true" title="인스타 댓글 분류 규칙"></database>',
+                                  "in_trash": True},
+            DEFAULT_DATA_SOURCE: {"last_edited_time": EDITED},
+            DEFAULT_PAGE_ID: {"page_last_edited_at": EDITED},
+        }
+        book, events = self._logs(settings, MemoryState(), Notion(rows_from_file(), fetches=fetches))
+        self.assertTrue(book["policy_ref"].startswith("file:v2.3:"))
+        self.assertEqual(events[-1]["severity"], "WARNING")
+        self.assertEqual(events[-1]["source"], "file")
+        self.assertIn("휴지통", events[-1]["reason"])
+
+    def test_an_archived_parent_page_is_not_used(self):
+        settings = {"moderation": {"rulebook": {"source": "notion"}}}
+        fetches = {
+            DEFAULT_DATABASE_ID: {"last_edited_time": EDITED},
+            DEFAULT_DATA_SOURCE: {"last_edited_time": EDITED},
+            DEFAULT_PAGE_ID: {"archived": True, "text": "인스타 댓글 검열 규정집"},
+        }
+        book, events = self._logs(settings, MemoryState(), Notion(rows_from_file(), fetches=fetches))
+        self.assertTrue(book["policy_ref"].startswith("file:v2.3:"))
+        self.assertEqual(events[-1]["severity"], "WARNING")
+        self.assertIn("휴지통", events[-1]["reason"])
+
+    def test_database_markdown_edit_time_is_the_version(self):
+        edited = "2026-11-17T04:12:00.000Z"
+        settings = {"moderation": {"rulebook": {"source": "notion"}}}
+        fetches = {
+            DEFAULT_DATABASE_ID: {"text": '<database last-edited-time="' + edited + '" title="인스타 댓글 분류 규칙"></database>'},
+            DEFAULT_DATA_SOURCE: {"last_edited_time": "2026-11-01T00:00:00.000Z"},
+            DEFAULT_PAGE_ID: {"page_last_edited_at": "2026-11-02T00:00:00.000Z"},
+        }
+        book, events = self._logs(settings, MemoryState(), Notion(rows_from_file(), fetches=fetches))
+        self.assertTrue(book["policy_ref"].startswith("notion:" + edited + ":"))
+        self.assertEqual(events[-1]["edited"], edited)
+        self.assertNotIn("unknown", book["policy_ref"])
+
+    def test_data_source_edit_time_is_used_when_the_database_fetch_has_none(self):
+        edited = "2026-11-16T09:30:00.000Z"
+        settings = {"moderation": {"rulebook": {"source": "notion"}}}
+        fetches = {
+            DEFAULT_DATABASE_ID: {"text": "<database title=\"인스타 댓글 분류 규칙\"></database>"},
+            DEFAULT_DATA_SOURCE: {"metadata": {"type": "data_source", "last_edited_time": edited}},
+            DEFAULT_PAGE_ID: {"page_last_edited_at": "2026-11-01T00:00:00.000Z"},
+        }
+        book, events = self._logs(settings, MemoryState(), Notion(rows_from_file(), fetches=fetches))
+        self.assertTrue(book["policy_ref"].startswith("notion:" + edited + ":"))
+        self.assertEqual(events[-1]["edited"], edited)
+
+    def test_config_and_defaults_use_the_live_database(self):
+        from sns_comment.profiles import read_settings
+        configured = read_settings()["moderation"]["rulebook"]
+        self.assertEqual(configured["database_id"], DEFAULT_DATABASE_ID)
+        self.assertEqual(configured["data_source_url"], DEFAULT_DATA_SOURCE)
+        self.assertEqual(configured["page_id"], DEFAULT_PAGE_ID)
+        self.assertEqual(DEFAULT_DATABASE_ID, "41b0761a512d8172823bffc0cf69ca21")
+        self.assertEqual(DEFAULT_DATA_SOURCE, "collection://41b0761a-512d-814c-aec7-000b844d9f30")
+        self.assertEqual(DEFAULT_PAGE_ID, "41b0761a512d81259c81d50af0fec6a3")
+        self.assertNotIn("41b0761a512d81ebbab8f5bf230b79ee", json.dumps(configured))
 
 
 if __name__ == "__main__":
