@@ -123,8 +123,12 @@ def _note(record, hide_tab):
             text += " " + str(record["hidden_check"])
         if record.get("status") == "hide_failed" and record.get("error"):
             text += " " + " ".join(str(record["error"]).split())[:80]
-        return text
-    return (when + " KST 자동 감지").strip()
+    else:
+        text = (when + " KST 자동 감지").strip()
+    ref = record.get("policy_ref") if isinstance(record.get("policy_ref"), str) else ""
+    if ref.strip():
+        text += " 기준 " + ref.strip()
+    return text
 
 
 def row_values(record, number):

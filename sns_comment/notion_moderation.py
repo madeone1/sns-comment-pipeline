@@ -1031,15 +1031,16 @@ def open_notion(settings, state):
     return client, reader
 
 
-def prepare_notion_decisions(settings, state, sheet):
+def prepare_notion_decisions(settings, state, sheet, mcp=None):
     """Read Notion choices before the sheet hide/keep pass. Failures stay non-fatal."""
     if not notion_decisions_enabled() or sheet is None:
         return None
     try:
-        opened = _open_locked(settings, state)
-        if opened is None:
-            return None
-        mcp, _reader = opened
+        if mcp is None:
+            opened = _open_locked(settings, state)
+            if opened is None:
+                return None
+            mcp = opened[0]
         database = ensure_database(mcp, state, settings)
         pulled = pull_decisions(sheet, mcp, database, state=state)
         return {"mcp": mcp, "database": database, "pulled": pulled}

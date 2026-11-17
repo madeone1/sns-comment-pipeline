@@ -453,10 +453,12 @@ def execute(config, state, notion, analyzer, instant=None, lease_held=False):
                     except PilotError as error:
                         log("moderation_sheet_unavailable", account=config["expected_username"], error=str(error))
                     from .cloud_state import MODERATION_LEASE, lease_retry
+                    from .rulebook_source import resolve_rulebook
                     with lease_retry(shared_state, 180, MODERATION_LEASE, attempts=5, wait_seconds=3):
+                        rulebook = resolve_rulebook(config, shared_state, getattr(notion, "client", None))
                         note = moderate(rows, shared_state, config, moderator, client=client,
                             account_username=config["expected_username"], region=config.get("region_label"),
-                            sheet_client=sheet_client)
+                            sheet_client=sheet_client, book=rulebook)
                     log("moderation_daily_recorded", account=config["expected_username"], classified=note["classified"],
                         would_hide=note["would_hide"], human_review=note["human_review"], kept=note["kept"])
                 except (PilotError, OSError, ValueError, KeyError, TypeError) as error:

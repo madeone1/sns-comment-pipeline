@@ -136,7 +136,7 @@ def poll_recent(client, account_id, owner, cutoff, media_limit):
     return attach_permalinks(client, found), None
 
 
-def sweep_account(config, state, client, model, settings, now, sheet_client=None):
+def sweep_account(config, state, client, model, settings, now, sheet_client=None, book=None):
     account_id = config["account_id"]
     owner = config["expected_username"].lstrip("@")
     mod = settings.get("moderation") or {}
@@ -161,14 +161,14 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
         if len(chosen) >= 40:
             break
     if hiding_enabled(settings):
-        book = load_rulebook(mod.get("policy_version"))
-        for comment in comments_waiting_to_hide(state, account_id, policy_sha(book)):
+        active = book or load_rulebook(mod.get("policy_version"))
+        for comment in comments_waiting_to_hide(state, account_id, policy_sha(active)):
             if comment["id"] in seen:
                 continue
             seen.add(comment["id"])
             chosen.append(comment)
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
-                      region=config.get("region_label"), sheet_client=sheet_client)
+                      region=config.get("region_label"), sheet_client=sheet_client, book=book)
     if rate:
         result["status"] = "rate_limited"
     result["account"] = owner
@@ -176,12 +176,12 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     return result
 
 
-def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
+def sweep(configs, state, client, model, settings, now=None, sheet_client=None, book=None):
     moment = now or dt.datetime.now(dt.timezone.utc)
     results = []
     for config in configs:
         try:
-            results.append(sweep_account(config, state, client, model, settings, moment, sheet_client=sheet_client))
+            results.append(sweep_account(config, state, client, model, settings, moment, sheet_client=sheet_client, book=book))
         except PilotError as error:
             results.append({"account": config.get("expected_username"), "status": "failed", "error": str(error),
                             "classified": 0, "would_hide": 0, "hidden": 0, "human_review": 0})
@@ -293,7 +293,17 @@ def run(settings, state, project, now=None):
                              api_host=configs[0].get("_meta_api_host", "graph.facebook.com"))
         model = VertexModerator(state.transport, project, settings.get("cloud", {}).get("ai_model", "gemini-3.8-flash"))
         sheet = open_sheet(settings, state)
-        result = sweep(configs, state, client, model, settings, now=now, sheet_client=sheet)
+        from .rulebook_source import resolve_rulebook, rulebook_source
+        notion_mcp = None
+        if rulebook_source(settings) == "notion":
+            try:
+                from .notion_moderation import _open_locked
+                opened = _open_locked(settings, state)
+                notion_mcp = opened[0] if opened else None
+            except PilotError as error:
+                log("moderation_rulebook_unavailable", error=str(error))
+        book = resolve_rulebook(settings, state, notion_mcp)
+        result = sweep(configs, state, client, model, settings, now=now, sheet_client=sheet, book=book)
         if sheet is not None:
             try:
                 flush_sheet_log(state, sheet)
@@ -302,7 +312,7 @@ def run(settings, state, project, now=None):
             notion = None
             try:
                 from .notion_moderation import complete_notion_decisions, prepare_notion_decisions
-                notion = prepare_notion_decisions(settings, state, sheet)
+                notion = prepare_notion_decisions(settings, state, sheet, mcp=notion_mcp)
             except PilotError as error:
                 log("notion_decision_unavailable", error=str(error))
             try:
