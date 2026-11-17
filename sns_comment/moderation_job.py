@@ -58,7 +58,7 @@ def _phase(phase, started, **values):
     log("moderation_phase", phase=phase, seconds=round(time.perf_counter() - started, 3), **values)
 
 
-def sweep_account(config, state, client, model, settings, now, sheet_client=None):
+def sweep_account(config, state, client, model, settings, now, sheet_client=None, book=None):
     from .moderation_polling import Polling
     account_id = config["account_id"]
     owner = config["expected_username"].lstrip("@")
@@ -81,8 +81,8 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     promoted = 0
     mark = time.perf_counter()
     if hiding_enabled(settings):
-        book = load_rulebook(mod.get("policy_version"))
-        for comment in comments_waiting_to_hide(state, account_id, policy_sha(book)):
+        active = book or load_rulebook(mod.get("policy_version"))
+        for comment in comments_waiting_to_hide(state, account_id, policy_sha(active)):
             if comment["id"] in seen:
                 continue
             seen.add(comment["id"])
@@ -91,7 +91,7 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     _phase("promote", mark, account=owner, queued=promoted)
     mark = time.perf_counter()
     result = moderate(chosen, state, settings, model, client=client, account_username=owner,
-                      region=config.get("region_label"), sheet_client=sheet_client)
+                      region=config.get("region_label"), sheet_client=sheet_client, book=book)
     _phase("classify", mark, account=owner, classified=result.get("classified") or 0,
            would_hide=result.get("would_hide") or 0, hidden=result.get("hidden") or 0,
            human_review=result.get("human_review") or 0, kept=result.get("kept") or 0)
@@ -111,7 +111,7 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     return result
 
 
-def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
+def sweep(configs, state, client, model, settings, now=None, sheet_client=None, book=None):
     moment = now or dt.datetime.now(dt.timezone.utc)
     if configs:
         # Rotate the starting account so a shared request budget cannot starve one account.
@@ -120,7 +120,7 @@ def sweep(configs, state, client, model, settings, now=None, sheet_client=None):
     results = []
     for config in configs:
         try:
-            results.append(sweep_account(config, state, client, model, settings, moment, sheet_client=sheet_client))
+            results.append(sweep_account(config, state, client, model, settings, moment, sheet_client=sheet_client, book=book))
         except PilotError as error:
             log('moderation_account_failed', account=config.get('expected_username'), error=str(error))
             results.append({"account": config.get("expected_username"), "status": "failed", "error": str(error),
@@ -243,8 +243,18 @@ def run(settings, state, project, now=None):
         mark = time.perf_counter()
         sheet = open_sheet(settings, state)
         _phase("sheet_open", mark, opened=sheet is not None)
+        from .rulebook_source import resolve_rulebook, rulebook_source
+        notion_mcp = None
+        if rulebook_source(settings) == "notion":
+            try:
+                from .notion_moderation import _open_locked
+                opened = _open_locked(settings, state)
+                notion_mcp = opened[0] if opened else None
+            except PilotError as error:
+                log("moderation_rulebook_unavailable", error=str(error))
+        book = resolve_rulebook(settings, state, notion_mcp)
         mark = time.perf_counter()
-        result = sweep(configs, state, client, model, settings, now=now, sheet_client=sheet)
+        result = sweep(configs, state, client, model, settings, now=now, sheet_client=sheet, book=book)
         _phase("sweep", mark, accounts=len(configs), status=result.get("status"))
         if sheet is not None:
             mark = time.perf_counter()
@@ -257,7 +267,7 @@ def run(settings, state, project, now=None):
             mark = time.perf_counter()
             try:
                 from .notion_moderation import complete_notion_decisions, prepare_notion_decisions
-                notion = prepare_notion_decisions(settings, state, sheet)
+                notion = prepare_notion_decisions(settings, state, sheet, mcp=notion_mcp)
             except PilotError as error:
                 log("notion_decision_unavailable", error=str(error))
             _phase("notion_prepare", mark, opened=notion is not None)

@@ -51,7 +51,8 @@ def load_rulebook(expected=None):
 
 
 def policy_sha(book):
-    raw = json.dumps(book, ensure_ascii=False, sort_keys=True).encode()
+    body = {key: value for key, value in book.items() if key != "policy_ref"}
+    raw = json.dumps(body, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -502,6 +503,8 @@ def _record(comment, choice, account_username, region, book, sha, status, attemp
         "classified_at": now,
         "updated_at": now,
     }
+    if isinstance(book.get("policy_ref"), str) and book["policy_ref"].strip():
+        record["policy_ref"] = book["policy_ref"].strip()
     if isinstance(existing, dict) and existing.get("sheet_synced_status"):
         record["sheet_synced_status"] = existing["sheet_synced_status"]
     if extra:
@@ -528,7 +531,7 @@ SHEET_PENDING = "moderation/sheet-pending.json"
 def _sheet_snapshot(record):
     keys = ("account_id", "comment_id", "region", "account_username", "author_username", "author_id",
             "permalink", "parent_id", "written_at", "text", "rule_id", "reason", "confidence", "status",
-            "error", "hidden_check", "updated_at", "classified_at", "sheet_synced_status")
+            "error", "hidden_check", "updated_at", "classified_at", "sheet_synced_status", "policy_ref")
     snap = {key: record.get(key) for key in keys}
     snap["decision"] = decision_name(record["account_id"], record["comment_id"])
     return snap
@@ -764,13 +767,13 @@ def _hidden_check(client, comment_id):
     return "hidden 확인 실패"
 
 
-def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None):
+def moderate(comments, state, settings, model, client=None, account_username="", region=None, batch_size=None, sheet_client=None, book=None):
     """Record every decision. POST hide=true only for a high-confidence 숨김 when hiding is enabled."""
     mod = settings.get("moderation") or {}
     if mod.get("mode", "dry_run") == "off":
         return {"status": "off", "classified": 0, "skipped": 0, "would_hide": 0, "hidden": 0,
                 "human_review": 0, "kept": 0, "hide_failed": 0, "usage": {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
-    book = load_rulebook(mod.get("policy_version"))
+    book = book or load_rulebook(mod.get("policy_version"))
     sha = policy_sha(book)
     size = batch_size or int(mod.get("batch_size") or 20)
     classify, promote, skipped, preexisting, sheet_records = [], [], [], {}, []

@@ -5,10 +5,10 @@ runs/*, state/comments.sqlite3, state/reports.json, pipeline/*, the connection
 registry, and daily-merge/*. The moderation job does not take it.
 
 state/moderation-lease.json covers moderation/decisions/*, moderation/repeat-index/*,
-moderation/pending-hides/*, moderation/daily/*, and moderation/sheet-pending.json.
-The morning job takes this lock only while it classifies, so it cannot write those
-objects at the same time as the 10-minute job. Every write also sends the GCS
-generation it read.
+moderation/pending-hides/*, moderation/rulebook-cache.json, moderation/daily/*,
+and moderation/sheet-pending.json. The morning job takes this lock only while it
+classifies, so it cannot write those objects at the same time as the 10-minute job.
+Every write also sends the GCS generation it read.
 
 state/notion-moderation-lease.json covers moderation/notion-decision-database.json
 and the daily comment toggle. state/notion-summary-lease.json stops two summary
