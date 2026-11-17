@@ -59,21 +59,25 @@ def _phase(phase, started, **values):
 
 
 def sweep_account(config, state, client, model, settings, now, sheet_client=None, book=None):
-    from .moderation_polling import Polling
+    from .moderation_polling import Polling, ReadBudget
     account_id = config["account_id"]
     owner = config["expected_username"].lstrip("@")
     mod = settings.get("moderation") or {}
     started = time.perf_counter()
     mark = started
-    polling = Polling(state, account_id, owner, mod, now, comment_from_payload)
-    deadline = time.monotonic() + int(mod.get('poll_seconds') or 90)
-    polling.webhooks(client, deadline=deadline)
+    polling = Polling(state, account_id, owner, mod, now, comment_from_payload,
+                      policy=policy_sha(book) if book else None)
+    reads = ReadBudget(client, int(mod.get('poll_requests_per_account') or 240))
+    deadline = time.monotonic() + int(mod.get('poll_seconds') or 120)
+    polling.webhooks(reads, deadline=deadline)
     if not polling.blocked:
-        polling.peek(client, deadline)
+        polling.retry_unavailable(reads, deadline=deadline)
     if not polling.blocked:
-        polling.scan(client, 'recent', int(mod.get('recent_pages_per_run') or 16), deadline)
+        polling.peek(reads, deadline)
     if not polling.blocked:
-        polling.scan(client, 'catalog', int(mod.get('catalog_pages_per_run') or 8), deadline)
+        polling.scan(reads, 'recent', int(mod.get('recent_pages_per_run') or 32), deadline)
+    if not polling.blocked:
+        polling.scan(reads, 'catalog', int(mod.get('catalog_pages_per_run') or 160), deadline)
     queued = polling.pending(int(mod.get('processing_batch_size') or 40))
     chosen = list(queued)
     seen = {row['id'] for row in chosen}
@@ -102,9 +106,11 @@ def sweep_account(config, state, client, model, settings, now, sheet_client=None
     if polling.error:
         result['status'] = 'rate_limited' if _rate_limited(polling.error) else 'pending'
         result['poll_error'] = str(polling.error)
-    elif (result['status'] == 'complete' and (result['coverage']['queued'] or
+    elif (result['status'] == 'complete' and (result['coverage']['queued'] or result['coverage']['webhook_pending'] or
           not result['coverage']['recent_complete'] or not result['coverage']['catalog_complete'])):
         result['status'] = 'pending'
+    elif result['status'] == 'complete' and result['coverage']['unavailable_count']:
+        result['status'] = 'complete_with_exceptions'
     log('moderation_coverage', account=owner, status=result['status'],
         error=result.get('poll_error'), **result['coverage'])
     result["account"] = owner
@@ -133,6 +139,8 @@ def sweep(configs, state, client, model, settings, now=None, sheet_client=None, 
         status = "rate_limited"
     elif any(item.get("status") == "pending" for item in results):
         status = "pending"
+    elif any(item.get("status") == "complete_with_exceptions" for item in results):
+        status = "complete_with_exceptions"
     return {"status": status, "accounts": results,
             "classified": sum(item.get("classified") or 0 for item in results),
             "would_hide": sum(item.get("would_hide") or 0 for item in results),
@@ -237,7 +245,7 @@ def run(settings, state, project, now=None):
     mark = time.perf_counter()
     token, _name = read_token(state.transport, _reference(settings, configs))
     try:
-        client = GraphClient(token, settings["api_version"], max_requests=400,
+        client = GraphClient(token, settings["api_version"], max_requests=2000,
                              api_host=configs[0].get("_meta_api_host", "graph.facebook.com"))
         _phase("token", mark, accounts=len(configs))
         model = VertexModerator(state.transport, project, settings.get("cloud", {}).get("ai_model", "gemini-3.8-flash"))

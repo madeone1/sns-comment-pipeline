@@ -26,6 +26,14 @@ class ModerationReleaseCheckTests(unittest.TestCase):
                 check.verify(read_settings(), shared)
         shared.json_get.assert_not_called()
 
+    def test_release_requires_bounded_read_concurrency_and_account_budget(self):
+        for key, value in [('poll_workers', 20), ('poll_requests_per_account', 2000)]:
+            with self.subTest(key=key):
+                settings = read_settings()
+                settings['moderation'][key] = value
+                with self.assertRaises(PilotError):
+                    check.check_settings(settings)
+
 
 if __name__ == '__main__':
     unittest.main()
