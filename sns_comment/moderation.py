@@ -51,7 +51,7 @@ def load_rulebook(expected=None):
 
 
 def policy_sha(book):
-    body = {key: value for key, value in book.items() if key != "policy_ref"}
+    body = {key: value for key, value in book.items() if key not in {"policy_ref", "conditions"}}
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
@@ -190,14 +190,14 @@ def _repeat_choice(earlier, decided):
 
 def classify_comments(comments, model, book, batch_size=20, prior=None, earlier_posts=None):
     """Apply guard order, then one model batch for the rest. Same-author repeats do not call the model again."""
-    from .author_cap import author_cap_enabled, author_ranks, cap_choice
+    from .count_rules import repeat_rule_configured, structural_decisions
     prior = prior or {}
     ordered = sorted(comments, key=lambda row: (str(row.get("written_at") or ""), str(row.get("id") or "")))
-    ranks = author_ranks(ordered, earlier_posts) if author_cap_enabled(book) else {}
+    matched = structural_decisions(ordered, earlier_posts, book)
     decided, pending = {}, []
     for comment in ordered:
-        if ranks.get(comment.get("id"), 1) > 2:
-            decided[comment["id"]] = cap_choice()
+        if comment.get("id") in matched:
+            decided[comment["id"]] = matched[comment["id"]]
             continue
         choice = guard(comment)
         if choice is not None:
@@ -206,7 +206,11 @@ def classify_comments(comments, model, book, batch_size=20, prior=None, earlier_
             pending.append(comment)
     firsts, repeats = [], []
     seen = {}
+    use_legacy_repeat = not repeat_rule_configured(book)
     for comment in pending:
+        if not use_legacy_repeat:
+            firsts.append(comment)
+            continue
         earlier = None
         for key in repeat_slots(comment):
             entry = prior.get(key) or seen.get(key)

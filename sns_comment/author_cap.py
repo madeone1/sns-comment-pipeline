@@ -61,7 +61,10 @@ def _stamp(comment):
     identifier = comment.get("id") or comment.get("comment_id") or ""
     if not isinstance(written, str) or not written.strip() or not isinstance(identifier, str) or not identifier:
         return None
-    return {"id": identifier, "written_at": written}
+    stamped = {"id": identifier, "written_at": written}
+    if isinstance(comment.get("text"), str):
+        stamped["text"] = comment["text"]
+    return stamped
 
 
 def author_ranks(comments, earlier=None):
@@ -158,7 +161,7 @@ def _blank_sweep():
 
 def _blank_counts():
     return {"scanned": 0, "within_limit": 0, "would_hide": 0, "already": 0,
-            "human_kept": 0, "hidden": 0, "hide_failed": 0}
+            "human_kept": 0, "human_review": 0, "hidden": 0, "hide_failed": 0}
 
 
 def _comment(item, account_id, owner, media_id, parent_id, permalink):
@@ -245,36 +248,62 @@ def _collect_media(client, account_id, owner, checkpoint):
         return checkpoint
 
 
-def _judge_media(checkpoint, state, settings, client, sheet, book, account_id, owner, region, apply):
-    comments = [item for item in checkpoint.get("collected") or [] if isinstance(item, dict)]
-    ranks = author_ranks(comments, posts_for_accounts(state, [account_id]))
+def _judge_account(checkpoint, state, client, sheet, book, account_id, owner, region, apply):
+    from .count_rules import HIDE_LABEL, REVIEW_LABEL, structural_decisions
+    comments = [item for item in checkpoint.get("all") or [] if isinstance(item, dict)]
+    decisions = structural_decisions(comments, posts_for_accounts(state, [account_id]), book)
     remember_author_posts(state, comments)
     counts = checkpoint["counts"]
-    hides = []
+    hides, reviews = [], []
     for comment in comments:
         counts["scanned"] += 1
-        if not _has_written_at(comment) or not post_slot(comment):
-            counts["within_limit"] += 1
-            continue
-        if ranks.get(comment["id"], 1) <= CAP_LIMIT:
+        choice = decisions.get(comment.get("id"))
+        if not choice:
             counts["within_limit"] += 1
             continue
         existing, _generation = state.json_get(decision_name(account_id, comment["id"]))
         if _human_kept(existing):
             counts["human_kept"] += 1
             continue
-        if comment.get("already_hidden") or (isinstance(existing, dict) and existing.get("status") == "hidden"):
+        if choice["label"] == HIDE_LABEL and (comment.get("already_hidden") or
+                                              (isinstance(existing, dict) and existing.get("status") == "hidden")):
             counts["already"] += 1
             continue
-        counts["would_hide"] += 1
-        hides.append(comment)
-    checkpoint["collected"] = []
-    checkpoint["media_id"] = ""
-    checkpoint["ready"] = False
+        marked = {**comment, "_rule_id": choice["rule_id"], "_reason": choice["reason"], "_label": choice["label"]}
+        if choice["label"] == HIDE_LABEL:
+            counts["would_hide"] += 1
+            hides.append(marked)
+        elif choice["label"] == REVIEW_LABEL:
+            counts["human_review"] += 1
+            reviews.append(marked)
+        else:
+            counts["within_limit"] += 1
+    checkpoint["judged"] = True
     if not apply:
         return False
     checkpoint["pending_hides"] = hides
+    checkpoint["pending_reviews"] = reviews
+    _write_reviews(checkpoint, state, sheet, book, account_id, owner, region)
     return _hide_pending(checkpoint, state, client, sheet, book, account_id, owner, region)
+
+
+def _write_reviews(checkpoint, state, sheet, book, account_id, owner, region):
+    from .moderation import REVIEW_LABEL, policy_sha
+    sha = policy_sha(book)
+    for comment in checkpoint.get("pending_reviews") or []:
+        existing, generation = state.json_get(decision_name(account_id, comment["id"]))
+        choice = {"label": REVIEW_LABEL, "rule_id": comment.get("_rule_id") or "",
+                  "reason": comment.get("_reason") or "", "confidence": "high", "source": "guard"}
+        record = _record(comment, choice, owner, region, book, sha, "human_review", 0, extra={},
+                         existing=existing if isinstance(existing, dict) else None)
+        _put(state, decision_name(account_id, comment["id"]), record, generation)
+        _queue_sheet(state, [record] if _has_written_at(record) else [])
+        if sheet is not None:
+            try:
+                flush_sheet_log(state, sheet)
+            except PilotError:
+                pass
+    checkpoint["pending_reviews"] = []
 
 
 def _hide_pending(checkpoint, state, client, sheet, book, account_id, owner, region):
@@ -288,7 +317,9 @@ def _hide_pending(checkpoint, state, client, sheet, book, account_id, owner, reg
             remaining.append(comment)
             continue
         existing, generation = state.json_get(decision_name(account_id, comment["id"]))
-        choice = cap_choice()
+        choice = {"label": HIDE_LABEL, "rule_id": comment.get("_rule_id") or CAP_RULE,
+                  "reason": comment.get("_reason") or cap_choice()["reason"],
+                  "confidence": "high", "source": "guard"}
         status, extra = "hidden", {}
         attempts = int((existing or {}).get("hide_attempts") or 0) + 1 if isinstance(existing, dict) else 1
         try:
@@ -342,8 +373,14 @@ def sweep_account_cap(config, state, client, settings, sheet, book, apply):
                 continue
             checkpoint = _collect_media(client, account_id, owner, checkpoint)
             if checkpoint.get("ready"):
-                paused = _judge_media(checkpoint, state, settings, client, sheet, book, account_id, owner,
-                                      config.get("region_label"), apply)
+                checkpoint.setdefault("all", []).extend(checkpoint.get("collected") or [])
+                checkpoint["collected"] = []
+                checkpoint["media_id"] = ""
+                checkpoint["ready"] = False
+                continue
+            if checkpoint.get("done") and not checkpoint.get("judged"):
+                paused = _judge_account(checkpoint, state, client, sheet, book, account_id, owner,
+                                        config.get("region_label"), apply)
                 if paused:
                     break
                 continue

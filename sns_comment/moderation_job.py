@@ -326,14 +326,17 @@ def main(argv=None):
     parser.add_argument("--sort-sheet", action="store_true", help="기준표 데이터 행을 댓글 작성일 내림차순으로 정렬합니다. 기본은 미리보기입니다.")
     parser.add_argument("--fill-missing-dates", action="store_true", help="C열이 비어 있는 행의 인스타 작성 시각을 읽고, 반영 시 그 시각으로 다시 정렬합니다. 기본은 미리보기입니다.")
     parser.add_argument("--author-cap", action="store_true",
-                        help="한 사람이 한 게시물에 쓴 댓글·답글이 3개째부터 숨깁니다. 기본은 미리보기입니다.")
+                        help="노션에 적힌 개수·패턴 규칙을 과거 댓글에 적용합니다. 기본은 미리보기입니다.")
+    parser.add_argument("--apply-count-rules", action="store_true",
+                        help="--author-cap 과 같습니다. 노션의 조건 규칙을 과거 댓글에 적용합니다.")
     parser.add_argument("--apply", action="store_true",
-                        help="--author-cap, --sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
+                        help="--author-cap, --apply-count-rules, --sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
     args = parser.parse_args(argv)
     try:
         settings = read_settings(args.config)
-        if args.author_cap:
-            from .author_cap import author_cap_enabled, sweep_author_cap
+        if args.author_cap or args.apply_count_rules:
+            from .author_cap import sweep_author_cap
+            from .count_rules import active_rules
             from .rulebook_source import resolve_rulebook, rulebook_source
             state = CloudState(os.environ["SNS_STATE_BUCKET"])
             notion_mcp = None
@@ -345,9 +348,9 @@ def main(argv=None):
                 except PilotError as error:
                     log("moderation_rulebook_unavailable", error=str(error))
             book = resolve_rulebook(settings, state, notion_mcp)
-            if not author_cap_enabled(book):
-                log("author_cap_inactive", severity="WARNING",
-                    message="D12가 사용 중이 아니라 한 게시물 2개 제한을 적용하지 않습니다.")
+            if not active_rules(book):
+                log("count_rules_inactive", severity="WARNING",
+                    message="사용 중인 개수·패턴 규칙이 없어 과거 댓글을 검사하지 않습니다.")
                 return 0
             sheet = open_sheet(settings, state) if args.apply else None
             clients = account_clients(settings, state)

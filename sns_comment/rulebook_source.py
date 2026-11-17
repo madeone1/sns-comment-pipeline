@@ -117,6 +117,12 @@ def build_rulebook(rows, edited=""):
             raise RulebookError(code + " 규칙의 설명이 비어 있습니다.")
         if active and order is None:
             raise RulebookError(code + " 규칙의 순서가 없습니다.")
+        try:
+            from .count_rules import ConditionSkip, parse_condition
+            condition = parse_condition(row, code)
+        except ConditionSkip as skipped:
+            _log("moderation_rule_skipped", severity="WARNING", code=skipped.code, message=skipped.message)
+            continue
         parsed.append({
             "order": order if order is not None else 10_000,
             "id": code,
@@ -124,9 +130,16 @@ def build_rulebook(rows, edited=""):
             "name": _text(row.get("이름")) or code,
             "definition": definition,
             "exceptions": _text(row.get("예외")),
+            "condition": condition,
         })
     parsed.sort(key=lambda item: (item["order"], item["id"]))
     rules = [{key: item[key] for key in ("id", "label", "name", "definition", "exceptions")} for item in parsed]
+    conditions = []
+    for item in parsed:
+        if not item.get("condition"):
+            continue
+        conditions.append({"id": item["id"], "label": item["label"], "name": item["name"],
+                           "order": item["order"], "reason": item["name"], **item["condition"]})
     hide_ids = [rule["id"] for rule in rules if rule["label"] == "삭제"]
     keep_ids = [rule["id"] for rule in rules if rule["label"] == "유지"]
     if not hide_ids or not keep_ids:
@@ -135,6 +148,8 @@ def build_rulebook(rows, edited=""):
     book["hide_rule_ids"] = hide_ids
     book["abolished"] = [rule["id"] for rule in rules if rule["label"] == "폐지"]
     book["rules"] = rules
+    if conditions:
+        book["conditions"] = conditions
     ref_time = edited.strip() if isinstance(edited, str) and edited.strip() else "unknown"
     book["policy_ref"] = "notion:" + ref_time + ":" + policy_sha(book)[:12]
     return book
@@ -246,9 +261,16 @@ def fetch_rows(client, settings):
     for payload in (fetched, source_fetched, page_fetched):
         if payload is not None and _trashed(payload):
             raise RulebookError("분류 기준표가 휴지통 또는 보관 상태라 사용하지 않습니다.")
-    query = 'SELECT "이름", "코드", "결과", "순서", "설명", "예외", "사용" FROM "' + source + '"'
-    result = client.call("query-data-sources", {"data": {
-        "mode": "sql", "data_source_urls": [source], "query": query, "params": []}})
+    base = 'SELECT "이름", "코드", "결과", "순서", "설명", "예외", "사용" FROM "' + source + '"'
+    extended = base.replace(" FROM ", ', "조건 종류", "숫자", "대상", "범위" FROM ')
+    try:
+        result = client.call("query-data-sources", {"data": {
+            "mode": "sql", "data_source_urls": [source], "query": extended, "params": []}})
+    except PilotError as error:
+        _log("moderation_rule_columns", severity="WARNING", message="조건 열을 읽지 못해 내용 규칙만 사용합니다.",
+             reason=str(error))
+        result = client.call("query-data-sources", {"data": {
+            "mode": "sql", "data_source_urls": [source], "query": base, "params": []}})
     if isinstance(result, dict) and (result.get("has_more") or result.get("next_cursor")):
         raise RulebookError("분류 기준표가 한 번에 읽히지 않았습니다.")
     if isinstance(result, dict) and _trashed({key: value for key, value in result.items() if key != "results"}):
