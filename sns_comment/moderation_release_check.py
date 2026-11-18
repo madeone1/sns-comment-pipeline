@@ -6,7 +6,7 @@ import json
 import os
 import time
 
-from .api import GraphClient, PilotError
+from .api import GraphClient, GraphError, PilotError
 from .cloud_state import CloudState, NOTION_OAUTH_LEASE, lease_retry
 from .connection_registry import REGISTRY_OBJECT, runtime_configs
 from .mcp import McpClient
@@ -41,6 +41,18 @@ class MemoryState:
         return [{'name': name, 'generation': 0} for name in self.values if name.startswith(prefix)]
 
 
+def _scan_warnings(polling):
+    """A per-account Graph error is a warning. Anything else still stops verify."""
+    warnings = list(getattr(polling, 'skipped_pages', []) or [])
+    error = polling.error
+    if isinstance(error, GraphError):
+        warnings.append(str(error))
+        return warnings
+    if error:
+        raise error
+    return warnings
+
+
 def verify(settings, shared):
     check_settings(settings)
     for flag in ('SNS_MODERATION_HIDE', 'SNS_HUMAN_DECISION_HIDE', 'SNS_NOTION_DECISIONS'):
@@ -65,8 +77,7 @@ def verify(settings, shared):
                           {**settings['moderation'], 'media_limit': 1},
                           dt.datetime.now(dt.timezone.utc), comment_from_payload)
         polling.scan(client, 'recent', 2)
-        if polling.error:
-            raise polling.error
+        warnings = _scan_warnings(polling)
         # Exercise the candidate against a COPY of the live pagination. No
         # production cursor, queue or exception record can be changed here.
         checkpoint, _ = shared.json_get(state_name(config['account_id']), {})
@@ -81,8 +92,7 @@ def verify(settings, shared):
         began = time.monotonic()
         resumed.webhooks(client, limit=12)
         resumed.scan(client, 'catalog', 32)
-        if resumed.error:
-            raise resumed.error
+        warnings.extend(_scan_warnings(resumed))
         accounts.append({'id': config['account_id'], 'username': config['expected_username'],
                          'api_reads': client.request_count,
                          'queue_simulated': len(polling.data['queue']),
@@ -90,6 +100,7 @@ def verify(settings, shared):
                          'resume_seconds': round(time.monotonic() - began, 3),
                          'resume_unavailable': resumed.coverage()['unavailable_count'],
                          'unavailable_receipts_checked': len(failures),
+                         'warnings': warnings,
                          'peak_concurrent_reads': client.metrics()['peak_concurrent_requests']})
     sheet = open_sheet(settings, shared)
     if sheet is None:
