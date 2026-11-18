@@ -263,14 +263,23 @@ def fetch_rows(client, settings):
             raise RulebookError("분류 기준표가 휴지통 또는 보관 상태라 사용하지 않습니다.")
     base = 'SELECT "이름", "코드", "결과", "순서", "설명", "예외", "사용" FROM "' + source + '"'
     extended = base.replace(" FROM ", ', "조건 종류", "숫자", "대상", "범위" FROM ')
+    with_minutes = extended.replace(" FROM ", ', "시간(분)" FROM ')
+
+    def query(sql):
+        return client.call("query-data-sources", {"data": {
+            "mode": "sql", "data_source_urls": [source], "query": sql, "params": []}})
+
     try:
-        result = client.call("query-data-sources", {"data": {
-            "mode": "sql", "data_source_urls": [source], "query": extended, "params": []}})
+        result = query(with_minutes)
     except PilotError as error:
-        _log("moderation_rule_columns", severity="WARNING", message="조건 열을 읽지 못해 내용 규칙만 사용합니다.",
-             reason=str(error))
-        result = client.call("query-data-sources", {"data": {
-            "mode": "sql", "data_source_urls": [source], "query": base, "params": []}})
+        _log("moderation_rule_columns", severity="WARNING",
+             message="시간(분) 열을 읽지 못해 몰림 규칙은 60분을 기본값으로 봅니다.", reason=str(error))
+        try:
+            result = query(extended)
+        except PilotError as error:
+            _log("moderation_rule_columns", severity="WARNING",
+                 message="조건 열을 읽지 못해 내용 규칙만 사용합니다.", reason=str(error))
+            result = query(base)
     if isinstance(result, dict) and (result.get("has_more") or result.get("next_cursor")):
         raise RulebookError("분류 기준표가 한 번에 읽히지 않았습니다.")
     if isinstance(result, dict) and _trashed({key: value for key, value in result.items() if key != "results"}):

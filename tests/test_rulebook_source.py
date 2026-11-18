@@ -211,6 +211,42 @@ class FallbackTests(unittest.TestCase):
         self.assertTrue(book["policy_ref"].startswith("notion:" + edited + ":"))
         self.assertEqual(events[-1]["edited"], edited)
 
+    def test_a_missing_minutes_column_keeps_the_other_condition_columns(self):
+        from sns_comment.rulebook_source import fetch_rows
+        rows = rows_from_file()
+        rows.append({"이름": "짧은 시간에 같은 대상이 몰림", "코드": "D13", "결과": "숨김", "순서": 11.6,
+                     "설명": "한 게시물에서 같은 대상이 짧은 시간에 많이 달리면 숨깁니다.",
+                     "예외": "", "사용": True, "조건 종류": "같은 대상 짧은 시간 몰림",
+                     "숫자": 10, "범위": "게시물별"})
+
+        class Client:
+            def __init__(self):
+                self.queries = []
+
+            def call(self, suffix, arguments):
+                if suffix == "fetch":
+                    return {"last_edited_time": EDITED}
+                if suffix != "query-data-sources":
+                    raise AssertionError(suffix)
+                query = arguments["data"]["query"]
+                self.queries.append(query)
+                if "시간(분)" in query:
+                    raise PilotError("column")
+                return {"results": rows}
+
+        client = Client()
+        stream = io.StringIO()
+        with mock.patch("sys.stdout", stream):
+            loaded, _edited = fetch_rows(client, {"moderation": {"rulebook": {"source": "notion"}}})
+        self.assertEqual(len(client.queries), 2)
+        self.assertNotIn("시간(분)", client.queries[1])
+        self.assertIn("조건 종류", client.queries[1])
+        self.assertIn("시간(분) 열을 읽지 못해", stream.getvalue())
+        built = build_rulebook(loaded, EDITED)
+        rule = next(item for item in built["conditions"] if item["id"] == "D13")
+        self.assertEqual(rule["minutes"], 60)
+        self.assertEqual(rule["threshold"], 10)
+
     def test_config_and_defaults_use_the_live_database(self):
         from sns_comment.profiles import read_settings
         configured = read_settings()["moderation"]["rulebook"]
