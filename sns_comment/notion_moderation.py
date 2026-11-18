@@ -234,7 +234,7 @@ def toggle_markdown(day, hidden, pending_count, database_tag=""):
     """One glance: the count, the decisions still open, one sheet link, and at most one table."""
     lines = ['<toggle heading="h3">', "💬 <b>" + toggle_title(day) + "</b>", "",
              summary_line(hidden), "", pending_line(pending_count), "",
-             "[📄 규정집 시트 열기](" + SHEET_URL + ")"]
+             "[📄 실제 처리된 댓글 보기 (구글시트)](" + SHEET_URL + ")"]
     if database_tag:
         lines.extend(["", database_tag])
     lines.append("</toggle>")
