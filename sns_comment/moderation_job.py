@@ -308,6 +308,23 @@ def run(settings, state, project, now=None):
         del token
 
 
+def selected_configs(configs, account):
+    """Keep every account, or the one named by id, full handle, or a handle piece such as toronto."""
+    if not isinstance(account, str) or not account.strip():
+        return list(configs)
+    token = account.strip().lstrip("@").casefold()
+    exact, partial = [], []
+    for config in configs:
+        username = str(config.get("expected_username") or "").lstrip("@").casefold()
+        identifier = str(config.get("account_id") or "")
+        label = str(config.get("region_label") or "").casefold()
+        if identifier == account.strip() or username == token:
+            exact.append(config)
+        elif token and (token in username.split("_") or token == label):
+            partial.append(config)
+    return exact or partial
+
+
 def log_hide_gate(settings):
     """Say so when the env flag is on but the config mode would ignore it."""
     mode = ((settings.get("moderation") or {}).get("mode") or "dry_run")
@@ -329,6 +346,10 @@ def main(argv=None):
                         help="노션에 적힌 개수·패턴 규칙을 과거 댓글에 적용합니다. 기본은 미리보기입니다.")
     parser.add_argument("--apply-count-rules", action="store_true",
                         help="--author-cap 과 같습니다. 노션의 조건 규칙을 과거 댓글에 적용합니다.")
+    parser.add_argument("--account",
+                        help="--apply-count-rules 와 함께 쓰면 그 계정만 검사합니다. 아이디, @핸들, 또는 toronto 처럼 핸들의 한 조각.")
+    parser.add_argument("--from-stored", action="store_true",
+                        help="--apply-count-rules 와 함께 쓰면 이미 저장된 댓글만 검사합니다. 인스타 목록은 다시 받지 않습니다.")
     parser.add_argument("--apply", action="store_true",
                         help="--author-cap, --apply-count-rules, --sort-sheet, --fill-missing-dates, --rewrite-toggle 과 함께 쓰면 반영합니다.")
     args = parser.parse_args(argv)
@@ -353,15 +374,21 @@ def main(argv=None):
                     message="사용 중인 개수·패턴 규칙이 없어 과거 댓글을 검사하지 않습니다.")
                 return 0
             sheet = open_sheet(settings, state) if args.apply else None
-            clients = account_clients(settings, state)
             registry, _generation = state.json_get(REGISTRY_OBJECT)
             if not isinstance(registry, dict):
                 registry = initial_registry(settings)
             configs = [config for config in runtime_configs(settings, registry) if config.get("account_id")]
+            configs = selected_configs(configs, args.account)
+            if args.account and not configs:
+                log("count_rules_account", severity="WARNING", account=args.account,
+                    message="해당 계정을 찾지 못해 과거 댓글을 검사하지 않습니다.")
+                return 0
+            clients = {} if args.from_stored and not args.apply else account_clients(settings, state)
             try:
                 from .cloud_state import MODERATION_LEASE
                 with state.lease(1620, MODERATION_LEASE):
-                    result = sweep_author_cap(configs, state, clients, settings, sheet, book, args.apply)
+                    result = sweep_author_cap(configs, state, clients, settings, sheet, book, args.apply,
+                                              source="stored" if args.from_stored else "graph")
             except CloudError as error:
                 if "진행 중" in str(error) or "잠금" in str(error):
                     log("moderation_skipped", message="skipped: lease busy", reason=str(error))

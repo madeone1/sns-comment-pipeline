@@ -17,6 +17,8 @@ CAP_RULE = "D12"
 CAP_LIMIT = 2
 INDEX_NAME = "moderation/author-posts/{account}.json"
 SWEEP_NAME = "moderation/author-cap/{account}.json"
+STORED_SWEEP_NAME = "moderation/author-cap/{account}.stored.json"
+POLLING_NAME = "moderation/polling/{account}.json"
 MEDIA_FIELDS = "id,permalink,timestamp"
 COMMENT_FIELDS = "id,text,timestamp,username,from,hidden"
 
@@ -136,6 +138,49 @@ def remember_author_posts(state, comments):
         if changed:
             current["entries"] = entries
             _put(state, INDEX_NAME.format(account=account_id), current, generation)
+
+
+def comments_from_stored(state, account_id):
+    """Comments already saved for this account. Does not call Instagram."""
+    found = {}
+    current, _generation = load_author_posts(state, account_id)
+    entries = current.get("entries") if isinstance(current, dict) else {}
+    for slot, items in (entries or {}).items():
+        media, _, author = str(slot).partition("\t")
+        author_id = author[3:] if author.startswith("id:") else None
+        username = author[5:] if author.startswith("name:") else None
+        for item in items or []:
+            stamped = _stamp(item) if isinstance(item, dict) else None
+            if not stamped or not str(stamped["id"]).isdigit():
+                continue
+            found[stamped["id"]] = {
+                "id": stamped["id"], "account_id": account_id,
+                "media_id": media if media.isdigit() else "",
+                "author_id": author_id, "username": username, "is_owner": 0,
+                "text": stamped.get("text"), "written_at": stamped["written_at"],
+            }
+    try:
+        polling, _generation = state.json_get(POLLING_NAME.format(account=account_id), {})
+    except (OSError, ValueError, TypeError):
+        polling = {}
+    queue = polling.get("queue") if isinstance(polling, dict) else None
+    if isinstance(queue, dict):
+        for comment in queue.values():
+            if not isinstance(comment, dict):
+                continue
+            identifier = comment.get("id")
+            if not isinstance(identifier, str) or not identifier.isdigit():
+                continue
+            current_row = found.get(identifier)
+            if current_row is None:
+                found[identifier] = dict(comment)
+                found[identifier]["account_id"] = account_id
+                continue
+            for key in ("text", "written_at", "username", "author_id", "permalink",
+                        "parent_id", "is_owner", "already_hidden", "media_id"):
+                if comment.get(key) not in (None, ""):
+                    current_row[key] = comment.get(key)
+    return list(found.values())
 
 
 def posts_for_accounts(state, account_ids, extra=None):
@@ -395,15 +440,53 @@ def sweep_account_cap(config, state, client, settings, sheet, book, apply):
     return counts
 
 
-def sweep_author_cap(configs, state, clients, settings, sheet, book, apply):
+def sweep_account_stored(config, state, client, settings, sheet, book, apply):
+    """Judge comments already in the state bucket. Instagram is used only to hide."""
+    account_id = config["account_id"]
+    owner = config["expected_username"].lstrip("@")
+    name = STORED_SWEEP_NAME.format(account=account_id)
+    checkpoint, generation = state.json_get(name, None)
+    if not isinstance(checkpoint, dict):
+        checkpoint = None
+        generation = 0
+    paused = False
+    if isinstance(checkpoint, dict) and checkpoint.get("pending_hides"):
+        checkpoint.setdefault("counts", _blank_counts())
+        paused = _hide_pending(checkpoint, state, client, sheet, book, account_id, owner,
+                               config.get("region_label"))
+    else:
+        comments = comments_from_stored(state, account_id)
+        checkpoint = _blank_sweep()
+        checkpoint["all"] = comments
+        checkpoint["done"] = True
+        checkpoint["source"] = "stored"
+        if comments:
+            paused = _judge_account(checkpoint, state, client, sheet, book, account_id, owner,
+                                    config.get("region_label"), apply)
+        else:
+            checkpoint["judged"] = True
+    _put(state, name, checkpoint, generation)
+    counts = dict(checkpoint.get("counts") or _blank_counts())
+    counts.update(account=owner, apply=apply, source="stored",
+                  done=not paused, status="rate_limited" if paused else "complete")
+    if not checkpoint.get("all") and not checkpoint.get("pending_hides"):
+        counts["message"] = "저장된 댓글이 없습니다."
+    return counts
+
+
+def sweep_author_cap(configs, state, clients, settings, sheet, book, apply, source="graph"):
     results = []
     for config in configs:
         from .moderation_sheet import account_tab
-        client = clients.get(account_tab({"region": config.get("region_label") or "",
-                                           "account_username": config.get("expected_username") or ""}))
-        if client is None:
+        client = None if not isinstance(clients, dict) else clients.get(account_tab({
+            "region": config.get("region_label") or "",
+            "account_username": config.get("expected_username") or ""}))
+        if client is None and not (source == "stored" and not apply):
             results.append({"account": config.get("expected_username"), "status": "failed",
-                            "error": "계정 토큰을 찾지 못했습니다.", **_blank_counts()})
+                            "error": "계정 토큰을 찾지 못했습니다.", "source": source, **_blank_counts()})
             continue
-        results.append(sweep_account_cap(config, state, client, settings, sheet, book, apply))
-    return {"apply": apply, "accounts": results}
+        if source == "stored":
+            results.append(sweep_account_stored(config, state, client, settings, sheet, book, apply))
+        else:
+            results.append(sweep_account_cap(config, state, client, settings, sheet, book, apply))
+    return {"apply": apply, "source": source, "accounts": results}

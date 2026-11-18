@@ -827,7 +827,8 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         for account_id in {comment["account_id"] for comment in classify}:
             prior.update(_prior_copies(state, account_id))
         from .author_cap import posts_for_accounts
-        earlier_posts = posts_for_accounts(state, {comment["account_id"] for comment in classify}, known_comments)
+        counted = list(known_comments or []) + list(comments or [])
+        earlier_posts = posts_for_accounts(state, {comment["account_id"] for comment in classify}, counted)
         decided, usage = classify_comments(classify, model, book, size, prior=prior, earlier_posts=earlier_posts)
         for key, value in usage.items():
             summary["usage"][key] += value
