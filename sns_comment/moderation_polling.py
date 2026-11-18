@@ -6,6 +6,7 @@ older posts and their reply pages. A failed run never advances either time floor
 
 import datetime as dt
 import hashlib
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -84,6 +85,7 @@ class Polling:
         self.data.setdefault('media_links', {})
         self.data.setdefault('unavailable', {})
         self.error = None
+        self.skipped_pages = []
         self.pages = {'recent': 0, 'catalog': 0}
         self.pause_reason = None
         from .moderation import load_rulebook, policy_sha
@@ -342,6 +344,8 @@ class Polling:
                                       'after': after, 'media_id': task['media_id'],
                                       'parent_id': item['id'], 'link': task.get('link'), 'trail': []})
         marker = task['path'] + ':' + str(task.get('after') or '')
+        if cursor and (task['path'] + ':' + cursor) in set(checkpoint.get('skipped') or []):
+            cursor = None
         if cursor and (task['kind'] != 'media' or lane == 'catalog'):
             next_marker = task['path'] + ':' + cursor
             trail = task.get('trail')
@@ -381,10 +385,54 @@ class Polling:
                 floor = min(floor, instant(completed) - dt.timedelta(minutes=overlap))
             checkpoint = {'since': floor.isoformat(), 'through': self.now.isoformat(),
                           'completed_through': completed, 'visited': [],
+                          'skipped': list((checkpoint or {}).get('skipped') or []),
                           'tasks': [{'kind': 'media', 'path': self.account_id + '/media'}]}
             self.data[lane] = checkpoint
             self.save()
         return checkpoint
+
+    def _skip_invalid_page(self, lane, checkpoint, task, error, keep=()):
+        """Drop a code-100 page and keep the rest of the backlog moving.
+
+        Code 100 without subcode 33 is an invalid parameter. On this walker that
+        is a stored paging cursor Meta will not accept, or one media item whose
+        comments edge rejects the request. Clearing the cursor and stopping left
+        the same page at the front of the catalog, so the older-post walk logged
+        the same 400 on later runs and never reached the posts behind it.
+        """
+        path = str(task.get('path') or '')
+        cursor = str(task.get('after') or '')
+        marker = path + ':' + cursor
+        skipped = checkpoint.setdefault('skipped', [])
+        if marker not in skipped:
+            skipped.append(marker)
+        media_id = task.get('media_id') if task.get('kind') != 'media' else None
+        keep_ids = {id(item) for item in keep if item is not task}
+
+        def retain(other):
+            if other is task:
+                return False
+            if id(other) in keep_ids:
+                return True
+            if media_id and other.get('media_id') == media_id:
+                return False
+            if other.get('path') == path:
+                return False
+            return True
+
+        checkpoint['tasks'] = [other for other in checkpoint['tasks'] if retain(other)]
+        notice = path + ((' after=' + cursor) if cursor else '')
+        self.skipped_pages.append(notice)
+        if task.get('kind') == 'media':
+            message = '게시물 목록의 커서가 거절되어 그 커서는 버립니다.'
+        else:
+            message = '이 페이지가 거절되어 그 게시물은 건너뜁니다.'
+        print(json.dumps({
+            'event': 'moderation_scan_skipped', 'severity': 'WARNING',
+            'account': self.owner, 'lane': lane, 'path': path, 'kind': task.get('kind'),
+            'media_id': task.get('media_id') or '', 'cursor': bool(cursor),
+            'code': error.code, 'message': message,
+        }, ensure_ascii=False), flush=True)
 
     def scan(self, client, lane, pages, deadline=None):
         checkpoint = self.start_lane(lane)
@@ -425,12 +473,18 @@ class Polling:
                         raise payload
                     self.apply_page(lane, task, payload)
                 except PilotError as error:
-                    if isinstance(error, GraphError) and error.code == 100 and task.get('after'):
+                    if isinstance(error, GraphError) and error.code == 100 and task.get('after') and unavailable(error):
+                        # A deleted object's old cursor is not the same failure as an
+                        # invalid cursor. Restart that edge once; deferral handles the
+                        # object if the first page is gone too.
                         task.pop('after', None)
                         task['trail'] = []
                         checkpoint['visited'] = [v for v in checkpoint['visited']
                                                  if not v.startswith(task['path'] + ':')]
                         self.error, stop = error, True
+                    elif isinstance(error, GraphError) and error.code == 100 and not unavailable(error) and not (
+                            task.get('kind') == 'media' and not task.get('after')):
+                        self._skip_invalid_page(lane, checkpoint, task, error, keep=batch)
                     elif unavailable(error) and task['kind'] != 'media':
                         key = self.task_key(lane, task)
                         self.defer(key, error, source='scan', lane=lane, path=task['path'],

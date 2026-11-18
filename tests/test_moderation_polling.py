@@ -423,15 +423,34 @@ class PollingTests(unittest.TestCase):
         self.assertIsNone(p.data['recent']['completed_through'])
         self.assertEqual(p.data['recent']['tasks'], [{'kind': 'media', 'path': ACCOUNT + '/media'}])
 
-    def test_expired_cursor_restarts_same_edge_without_moving_the_time_floor(self):
+    def test_invalid_cursor_is_skipped_so_later_media_still_run(self):
         p = polling()
-        api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}]),
+        api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}, {'id': '20002'}]),
                    ('20001/comments', None): page([comment(30001)], 'expired'),
-                   ('20001/comments', 'expired'): GraphError(400, 100)})
-        p.scan(api, 'recent', 10)
-        self.assertNotIn('after', p.data['recent']['tasks'][0])
-        self.assertIn('30001', p.data['queue'])
-        self.assertIsNone(p.data['recent']['completed_through'])
+                   ('20001/comments', 'expired'): GraphError(400, 100),
+                   ('20002/comments', None): page([comment(30002)])})
+        p.scan(api, 'catalog', 20)
+        self.assertIsNone(p.error)
+        self.assertEqual(set(p.data['queue']), {'30001', '30002'})
+        self.assertIn('20001/comments:expired', p.data['catalog']['skipped'])
+        self.assertTrue(p.coverage()['catalog_complete'])
+        self.assertTrue(p.skipped_pages)
+        api.calls.clear()
+        later = polling(p.state, NOW + dt.timedelta(minutes=30))
+        later.scan(api, 'catalog', 20)
+        self.assertNotIn(('20001/comments', 'expired'), api.calls)
+        self.assertIsNone(later.error)
+
+    def test_a_rejected_media_page_does_not_block_the_next_post(self):
+        p = polling()
+        api = Api({(ACCOUNT + '/media', None): page([{'id': '20001'}, {'id': '20002'}]),
+                   ('20001/comments', None): GraphError(400, 100),
+                   ('20002/comments', None): page([comment(30002)])})
+        p.scan(api, 'catalog', 20)
+        self.assertIsNone(p.error)
+        self.assertEqual(set(p.data['queue']), {'30002'})
+        self.assertIn('20001/comments:', p.data['catalog']['skipped'])
+        self.assertTrue(p.coverage()['catalog_complete'])
 
     def test_api_budget_rotates_account_order_on_next_scheduled_run(self):
         from sns_comment.moderation_job import sweep
