@@ -198,7 +198,7 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("어제 숨긴 댓글 1건 (서울 1 · 부산 0 · 속초 0 · 토론토 0)", text)
         self.assertIn("사람 판단 필요 1건 — 아래 표에서 숨김/유지를 고르세요", text)
         self.assertNotIn("- 서울", text)
-        self.assertIn("[📄 규정집 시트 열기](" + SHEET_URL + ")", text)
+        self.assertIn("[📄 실제 처리된 댓글 보기 (구글시트)](" + SHEET_URL + ")", text)
         self.assertNotIn("#gid=", text)
         self.assertNotIn("<mention", text)
         self.assertNotIn("<database", self.notion.pages["daily-page"].split(toggle_title(DAY))[1].split("### Info")[0])
@@ -388,7 +388,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(text.count("<mention"), 0)
         self.assertIn("어제 숨긴 댓글 0건 (서울 0 · 부산 0 · 속초 0 · 토론토 0)", text)
         self.assertIn("사람 판단 필요 1건 — 아래 표에서 숨김/유지를 고르세요", text)
-        self.assertIn("[📄 규정집 시트 열기](" + SHEET_URL + ")", text)
+        self.assertIn("[📄 실제 처리된 댓글 보기 (구글시트)](" + SHEET_URL + ")", text)
         self.assertNotIn("#gid=", text)
         start = text.index(toggle_title(DAY))
         self.assertLess(text.index("<database", start), text.index("</toggle>", start))
@@ -433,7 +433,7 @@ class SummaryTests(unittest.TestCase):
 
 사람 판단 필요 없음
 
-[📄 규정집 시트 열기](""" + SHEET_URL + """)
+[📄 실제 처리된 댓글 보기 (구글시트)](""" + SHEET_URL + """)
 
 """ + tag + """
 </toggle>
