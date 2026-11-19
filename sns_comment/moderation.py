@@ -188,12 +188,12 @@ def _repeat_choice(earlier, decided):
     return _decision(HIDE_LABEL, "D11", "같은 작성자의 반복입니다.", "high", "guard")
 
 
-def classify_comments(comments, model, book, batch_size=20, prior=None, earlier_posts=None):
+def classify_comments(comments, model, book, batch_size=20, prior=None, earlier_posts=None, account=None):
     """Apply guard order, then one model batch for the rest. Same-author repeats do not call the model again."""
     from .count_rules import repeat_rule_configured, structural_decisions
     prior = prior or {}
     ordered = sorted(comments, key=lambda row: (str(row.get("written_at") or ""), str(row.get("id") or "")))
-    matched = structural_decisions(ordered, earlier_posts, book)
+    matched = structural_decisions(ordered, earlier_posts, book, account)
     decided, pending = {}, []
     for comment in ordered:
         if comment.get("id") in matched:
@@ -829,7 +829,9 @@ def moderate(comments, state, settings, model, client=None, account_username="",
         from .author_cap import posts_for_accounts
         counted = list(known_comments or []) + list(comments or [])
         earlier_posts = posts_for_accounts(state, {comment["account_id"] for comment in classify}, counted)
-        decided, usage = classify_comments(classify, model, book, size, prior=prior, earlier_posts=earlier_posts)
+        who = {"id": str(classify[0].get("account_id") or ""), "username": account_username, "region": region}
+        decided, usage = classify_comments(classify, model, book, size, prior=prior, earlier_posts=earlier_posts,
+                                           account=who)
         for key, value in usage.items():
             summary["usage"][key] += value
         for comment in classify:

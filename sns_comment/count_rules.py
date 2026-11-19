@@ -28,6 +28,27 @@ count. Different authors count, including an official account, and the wording
 does not have to match beyond the target. A comment with no timestamp or no
 target is not part of a window. 숫자 defaults to 10 and 시간(분) defaults to
 60 when the cell is empty. This condition does not accept 계정 전체.
+
+특정 단어 포함
+--------------
+Each 대상 entry is a word to block. The comment text is folded first: NFKD without
+combining marks and format characters, then NFKC and casefold, so full-width
+ｘ:ｉｎ, bold or circled letters, and Cyrillic look-alikes become plain letters.
+An entry made only of ASCII letters and digits (x:in, @x.in_official, xin) is
+matched loosely: its letters and digits are read in order, each may repeat
+(XINNN), and up to 8 spaces, punctuation, symbols, or emoji may sit between them
+(X : IN, X🔥I.N). The match must stand on its own: a letter or digit right before
+or after it, or a handle continuing after an underscore (xin_yi), stops it, so
+maxine, xinyi, and @xin_yi are not matched, while xin_official, @x.in_official,
+#xin, and "XIN이" are. Hangul between the letters also stops it. Any other entry
+(for example Korean) is a plain substring test of the casefolded text, as before.
+Official-account comments (is_owner = 1) are never matched by this kind.
+
+An entry written as 계정:토론토 (or 계정:toronto, or an account id) does not block
+a word. It limits the whole row to that account: the row applies only to comments
+of that account. The account is known by its id, its handle, a handle piece such
+as toronto, or the Korean label 토론토. If the account is unknown, a row with a
+계정 limit matches nothing.
 """
 
 import datetime as dt
@@ -132,6 +153,102 @@ def comment_targets(text):
     return found
 
 
+_ACCOUNT_PREFIX = re.compile(r"^\s*계정\s*[:：]\s*(.+?)\s*$")
+_ALIASES = {"토론토": "toronto", "toronto": "토론토"}
+_LOOK_ALIKES = str.maketrans({"\u0445": "x", "\u0456": "i", "\u0131": "i", "\u04cf": "i", "\u0578": "n"})
+_LOOSE_GAP = r"[^a-z0-9\u1100-\u11ff\u3130-\u318f\uac00-\ud7a3]{0,8}"
+_LOOSE_CACHE = {}
+
+
+def fold_text(text):
+    """Make look-alike spellings of the same letters equal: full-width, bold, circled, accented, zero-width."""
+    if text is None:
+        return ""
+    raw = unicodedata.normalize("NFKD", str(text))
+    kept = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Cf"})
+    return unicodedata.normalize("NFKC", kept).casefold().translate(_LOOK_ALIKES)
+
+
+def _ascii_word(value):
+    folded = fold_text(value)
+    letters = [ch for ch in folded if ch.isalnum()]
+    if letters and all(ch.isascii() for ch in letters):
+        return "".join(letters)
+    return ""
+
+
+def loose_pattern(word):
+    """Regex for one blocked word: letters in order, repeats and symbol gaps allowed, standing alone."""
+    letters = _ascii_word(word)
+    if not letters:
+        return None
+    pattern = _LOOSE_CACHE.get(letters)
+    if pattern is None:
+        body = _LOOSE_GAP.join(re.escape(ch) + "+" for ch in letters)
+        pattern = re.compile(r"(?<![a-z0-9])(?<![a-z0-9]_)" + body + r"(?![a-z0-9])(?!_(?!official)[a-z0-9])")
+        _LOOSE_CACHE[letters] = pattern
+    return pattern
+
+
+def keyword_hit(text, targets):
+    if not isinstance(text, str) or not text.strip():
+        return False
+    folded = None
+    for target in targets or []:
+        pattern = loose_pattern(target)
+        if pattern is not None:
+            if folded is None:
+                folded = fold_text(text)
+            if pattern.search(folded):
+                return True
+        elif target and target in plain(text):
+            return True
+    return False
+
+
+def keyword_targets(value):
+    """Return (words, accounts). 계정:xxx entries limit the row; every other entry is a word."""
+    if value is None:
+        return [], []
+    if isinstance(value, list):
+        words, accounts = [], []
+        for item in value:
+            more_words, more_accounts = keyword_targets(item)
+            words += [w for w in more_words if w not in words]
+            accounts += [a for a in more_accounts if a not in accounts]
+        return words, accounts
+    words, accounts = [], []
+    text = value if isinstance(value, str) else str(value)
+    for part in text.replace("、", ",").replace("\n", ",").split(","):
+        found = _ACCOUNT_PREFIX.match(unicodedata.normalize("NFC", part))
+        if found:
+            token = fold_text(found.group(1)).strip().lstrip("@")
+            if token and token not in accounts:
+                accounts.append(token)
+            continue
+        item = unicodedata.normalize("NFC", part).strip()
+        if not item:
+            continue
+        item = fold_text(item).strip() if _ascii_word(item) else plain(item)
+        if item and item not in words:
+            words.append(item)
+    return words, accounts
+
+
+def account_allowed(rule, account):
+    wanted = rule.get("accounts") or []
+    if not wanted:
+        return True
+    if not isinstance(account, dict):
+        return False
+    username = fold_text(account.get("username") or "").lstrip("@")
+    have = {str(account.get("id") or ""), username, fold_text(account.get("region") or "").strip()}
+    have.update(piece for piece in username.split("_") if piece)
+    have.update(_ALIASES[item] for item in list(have) if item in _ALIASES)
+    have.discard("")
+    return any(token in have for token in wanted)
+
+
 def parse_condition(row, code):
     """Return a condition dict, None for a normal content rule, or raise ConditionSkip."""
     raw = row.get("조건 종류") if isinstance(row, dict) else None
@@ -154,6 +271,12 @@ def parse_condition(row, code):
     scope_label = scope_raw.strip() if isinstance(scope_raw, str) else ""
     scope = SCOPES.get(scope_label, "")
     targets = parse_targets(row.get("대상") if isinstance(row, dict) else None)
+    if kind == KEYWORD:
+        words, accounts = keyword_targets(row.get("대상") if isinstance(row, dict) else None)
+        if not words:
+            raise ConditionSkip(code, code + " 대상이 없어 그 행은 건너뜁니다.")
+        return {"kind": kind, "threshold": threshold, "scope": scope or "post", "targets": words,
+                "accounts": accounts}
     if kind == BURST:
         if threshold is None:
             raw_number = row.get("숫자") if isinstance(row, dict) else None
@@ -270,13 +393,14 @@ def _pool(comment, comments, earlier, scope, text=None):
     return [identifier for _written, identifier in rows]
 
 
-def _matches(rule, comment, comments, earlier):
+def _matches(rule, comment, comments, earlier, account=None):
     if not isinstance(comment, dict) or not comment.get("written_at"):
         return False
     kind = rule.get("kind")
     if kind == KEYWORD:
-        body = plain(str(comment.get("text") or ""))
-        return any(target and target in body for target in rule.get("targets") or [])
+        if comment.get("is_owner") == 1 or not account_allowed(rule, account):
+            return False
+        return keyword_hit(str(comment.get("text") or ""), rule.get("targets") or [])
     if kind == AUTHOR_ID:
         author = plain(_author(comment).split(":", 1)[-1])
         username = plain(str(comment.get("username") or comment.get("author_username") or ""))
@@ -380,8 +504,11 @@ def burst_hidden_ids(comments, earlier, rule):
     return hidden
 
 
-def structural_decisions(comments, earlier, book):
-    """First matching condition rule, in 순서. Later rules do not override it."""
+def structural_decisions(comments, earlier, book, account=None):
+    """First matching condition rule, in 순서. Later rules do not override it.
+
+    account is {"id", "username", "region"} of the account the comments belong to. It is only
+    read by rows that carry a 계정 limit."""
     rules = active_rules(book)
     if not rules:
         return {}
@@ -401,7 +528,7 @@ def structural_decisions(comments, earlier, book):
                 matched = str(comment.get("id")) in hidden
             else:
                 try:
-                    matched = _matches(rule, comment, ordered, earlier)
+                    matched = _matches(rule, comment, ordered, earlier, account)
                 except ValueError:
                     matched = False
             if matched:

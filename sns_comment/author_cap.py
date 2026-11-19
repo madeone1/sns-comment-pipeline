@@ -296,7 +296,8 @@ def _collect_media(client, account_id, owner, checkpoint):
 def _judge_account(checkpoint, state, client, sheet, book, account_id, owner, region, apply):
     from .count_rules import HIDE_LABEL, REVIEW_LABEL, structural_decisions
     comments = [item for item in checkpoint.get("all") or [] if isinstance(item, dict)]
-    decisions = structural_decisions(comments, posts_for_accounts(state, [account_id]), book)
+    who = {"id": str(account_id or ""), "username": owner, "region": region}
+    decisions = structural_decisions(comments, posts_for_accounts(state, [account_id]), book, who)
     remember_author_posts(state, comments)
     counts = checkpoint["counts"]
     hides, reviews = [], []
