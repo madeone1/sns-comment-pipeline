@@ -379,5 +379,73 @@ class BurstRuleTests(unittest.TestCase):
         self.assertIn("count_rules_account", stream.getvalue())
 
 
+XIN_ROW = {"이름": "토론토 X:IN 언급 (임시)", "코드": "D14", "결과": "숨김", "순서": 11.7, "설명": "임시 규칙",
+           "예외": "", "사용": True, "조건 종류": "특정 단어 포함", "대상": "x:in, @x.in_official, 계정:토론토"}
+XIN_YES = ("X:in", "x:in", "xin", "Xin", "XIn", "X IN", "X: IN", "XINNN", "xxiinn", "ｘ:ｉｎ", "Ｘ：ＩＮ", "Xin🙌",
+           "X🔥IN", "x . i . n", "@x.in_official 제발", "@xin_official", "@X.IN_OFFICIAL", "#xin", "XIN이 보고싶어요",
+           "Please bring X:IN!!!", "𝐗𝐈𝐍", "хin", "X\u200bIN", "x_in", "제발 x:in 와주세요")
+XIN_NO = ("maxine", "xinyi", "@xin_yi", "mix in", "next in line", "wax in", "xin2", "x 그 in", "hello", "6x in a row",
+          "Alexin", "taxing", "인", "엑스")
+
+
+class KeywordVariantTests(unittest.TestCase):
+    def test_every_spelling_of_xin_is_found_and_look_alike_words_are_not(self):
+        from sns_comment.count_rules import keyword_hit, keyword_targets
+        words, accounts = keyword_targets(XIN_ROW["대상"])
+        self.assertEqual(accounts, ["토론토"])
+        for text in XIN_YES:
+            self.assertTrue(keyword_hit(text, words), text)
+        for text in XIN_NO:
+            self.assertFalse(keyword_hit(text, words), text)
+
+    def test_korean_words_keep_the_plain_substring_test(self):
+        from sns_comment.count_rules import keyword_hit
+        self.assertTrue(keyword_hit("여기는 금지어 입니다", ["금지어"]))
+        self.assertFalse(keyword_hit("괜찮아요", ["금지어"]))
+
+    def test_the_row_parses_with_its_account_limit(self):
+        from sns_comment.count_rules import parse_condition
+        condition = parse_condition(XIN_ROW, "D14")
+        self.assertEqual(condition["kind"], "keyword")
+        self.assertEqual(condition["accounts"], ["토론토"])
+        self.assertIn("x:in", condition["targets"])
+        only_account = dict(XIN_ROW, 대상="계정:토론토")
+        from sns_comment.count_rules import ConditionSkip
+        with self.assertRaises(ConditionSkip):
+            parse_condition(only_account, "D14")
+
+    def _book(self):
+        rows = rows_from_file() + [XIN_ROW]
+        with mock.patch("sys.stdout", io.StringIO()):
+            return build_rulebook(rows, "2026-11-17T00:00:00Z")
+
+    def test_only_the_limited_account_is_affected(self):
+        book = self._book()
+        comments = [speak(str(41000 + i), "2026-11-17T00:%02d:00+00:00" % i, text=text, username="fan%d" % i,
+                          author_id=str(500 + i)) for i, text in enumerate(("X IN 제발", "안녕하세요"))]
+        toronto = {"id": "17841454752492067", "username": "waterbomb_toronto_official", "region": None}
+        seoul = {"id": "17841401245057628", "username": "waterbomb_official", "region": "서울"}
+        self.assertEqual(set(structural_decisions(comments, {}, book, toronto)), {"41000"})
+        self.assertEqual(structural_decisions(comments, {}, book, toronto)["41000"]["rule_id"], "D14")
+        self.assertEqual(structural_decisions(comments, {}, book, seoul), {})
+        self.assertEqual(structural_decisions(comments, {}, book), {})
+        official = speak("41100", "2026-11-17T00:30:00+00:00", text="X:IN 공지", username="waterbomb_toronto_official",
+                         author_id="1", owner=1)
+        self.assertEqual(structural_decisions([official], {}, book, toronto), {})
+
+    def test_the_live_path_hides_one_account_and_not_another(self):
+        for username, region, hidden in (("waterbomb_toronto_official", "토론토", ["41200"]),
+                                         ("waterbomb_toronto_official", None, ["41200"]),
+                                         ("waterbomb_busan_official", "부산", [])):
+            state, client = MemoryState(), Hides()
+            client.get = lambda path, **_params: {"hidden": True}
+            comment = speak("41200", "2026-11-17T00:00:00+00:00", text="Xinnn 보고싶어요!", username="fan",
+                            author_id="101")
+            moderate([comment], state, AUTO_ON, Model({"41200": {**answer("유지", "K1"), "id": "41200"}}), client=client,
+                     book=self._book(),
+                     account_username=username, region=region)
+            self.assertEqual(client.hidden, hidden, (username, region))
+
+
 if __name__ == "__main__":
     unittest.main()
