@@ -6,7 +6,7 @@ MadeOne의 Instagram·YouTube 댓글 파이프라인을 함께 보관하는 비�
 | 폴더 | 내용 | 시작 문서 |
 | --- | --- | --- |
 | `instagram/` | Instagram 댓글 수집·분류·숨김, 사람 판단, Notion 요약 | [Instagram 안내](instagram/README.md) |
-| `youtube/` | YouTube 댓글·답글 수집, Google Sheets 동기화, 저장본 보유·삭제, 기존 댓글 보고 안의 Notion 요약 | [YouTube 안내](youtube/README.md) |
+| `youtube/` | YouTube 댓글·답글 수집, Google Sheets 동기화, 저장본 보유·삭제, 독립된 Notion 댓글 관리 보고 | [YouTube 안내](youtube/README.md) |
 
 ```text
 instagram/
@@ -47,7 +47,7 @@ Windows Instagram 실행 파일은 `instagram/change-access-token.bat`이다.
 `waterbomb-sns-pipeline`의 `asia-northeast3` 리전에서 동작한다.
 인스타 수집·관리는 30분마다, 노션 보고는 평일 09시에 실행한다.
 유튜브 수집은 매일 08:30부터 시작하며 미완료분을 매시 30분에 이어서 수집하고,
-노션 보고는 평일 09:05에 기존 인스타 보고 안에 하루 한 번 추가한다.
+노션 보고는 평일 09:05에 일일 업무 Develop 아래 별도의 `유튜브 댓글 관리` 토글로 하루 한 번 작성한다.
 
 ## 인증정보와 실행 데이터
 

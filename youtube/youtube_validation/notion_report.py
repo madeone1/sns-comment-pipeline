@@ -1,4 +1,4 @@
-"""Append a YouTube summary inside the existing Instagram daily report.
+"""Publish an independent YouTube toggle beside the Instagram daily report.
 
 Uses a Notion connection token. It never changes Instagram's summary, decision
 table or other daily-page content. Source collection and OAuth are read-only.
@@ -24,7 +24,8 @@ from .notion_summary import KST, ReportDeferred, lines, summarize
 from .storage import STATE, private_dir, read_json
 
 
-LABEL = '🎬 유튜브 댓글'
+LEGACY_LABEL = '🎬 유튜브 댓글'
+LAYOUT_VERSION = 'standalone-v1'
 CONFIG = Path(__file__).with_name('notion_config.json')
 
 
@@ -43,6 +44,10 @@ def paragraph(value, link=None):
     if link:
         rich['text']['link'] = {'url': link}
     return {'object': 'block', 'type': 'paragraph', 'paragraph': {'rich_text': [rich]}}
+
+
+def report_title(day):
+    return '🎬 유튜브 댓글 관리 (' + day + ')'
 
 
 def checked_config(config):
@@ -133,22 +138,36 @@ class NotionClient:
             raise NotionReportError('daily_page_identity_mismatch')
         return page
 
-    def report_container(self, page, day):
-        wanted = '💬 인스타 댓글 관리 (' + day + ')'
-        found, active = [], False
-        for block in self.children(page['id']):
+    def develop_section(self, page):
+        root = self.children(page['id'])
+        headings = [block for block in root if block.get('type') in {'heading_1', 'heading_2', 'heading_3'}
+                    and not block.get(block['type'], {}).get('is_toggleable') and text(block).strip() == 'Develop']
+        if not headings:
+            raise ReportDeferred('develop_section_missing')
+        if len(headings) != 1:
+            raise NotionReportError('develop_section_ambiguous')
+        section, active = [], False
+        for block in root:
+            if block['id'] == headings[0]['id']:
+                active = True
+                continue
             kind, label = block.get('type'), text(block).strip()
             toggle_heading = bool(block.get(kind, {}).get('is_toggleable'))
-            if kind in {'heading_1', 'heading_2', 'heading_3'} and not toggle_heading:
-                active = label == 'Develop'
-            elif kind == 'divider':
-                active = False
-            if active and label == wanted and (kind == 'toggle' or toggle_heading):
-                found.append(block)
-        if not found:
-            raise ReportDeferred('instagram_report_not_ready')
+            if active and (kind == 'divider' or kind in {'heading_1', 'heading_2', 'heading_3'} and not toggle_heading):
+                break
+            if active:
+                section.append(block)
+        return headings[0], section
+
+    def report_container(self, page, day):
+        _, section = self.develop_section(page)
+        found = [block for block in section if text(block).strip() == report_title(day)]
         if len(found) != 1:
-            raise NotionReportError('instagram_report_ambiguous')
+            if not found:
+                return None
+            raise NotionReportError('youtube_report_ambiguous')
+        if found[0].get('type') != 'heading_3' or not found[0].get('heading_3', {}).get('is_toggleable'):
+            raise NotionReportError('youtube_report_shape_differs')
         return found[0]
 
     def expected_children(self, summary):
@@ -168,30 +187,47 @@ class NotionClient:
     def publish(self, summary):
         day = summary['report_day']
         page = self.daily_page(day)
-        container = self.report_container(page, day)
+        heading, section = self.develop_section(page)
         expected = self.expected_children(summary)
-
-        def existing():
-            return [row for row in self.children(container['id']) if row.get('type') == 'toggle' and text(row).strip() == LABEL]
-
-        found = existing()
-        if len(found) > 1:
-            raise NotionReportError('youtube_report_ambiguous')
-        if found:
-            if not self.matches(found[0], expected):
+        instagram = [block for block in section if text(block).strip() == '💬 인스타 댓글 관리 (' + day + ')'
+                     and (block.get('type') == 'toggle' or block.get(block.get('type'), {}).get('is_toggleable'))]
+        if len(instagram) > 1:
+            raise NotionReportError('instagram_report_ambiguous')
+        legacy = [row for row in self.children(instagram[0]['id'])
+                  if row.get('type') == 'toggle' and text(row).strip() == LEGACY_LABEL] if instagram else []
+        if len(legacy) > 1:
+            raise NotionReportError('youtube_legacy_report_ambiguous')
+        # Never trash a previous report if it contains changed data or manual notes.
+        if legacy and not self.matches(legacy[0], expected):
+            raise NotionReportError('youtube_legacy_content_differs')
+        container = self.report_container(page, day)
+        if container:
+            if not self.matches(container, expected):
                 raise NotionReportError('youtube_report_content_differs')
             outcome = 'unchanged'
         else:
-            self.request('PATCH', 'blocks/' + container['id'] + '/children', {
-                'children': [{'object': 'block', 'type': 'toggle', 'toggle': {
-                    'rich_text': [{'type': 'text', 'text': {'content': LABEL}}], 'children': expected}}],
+            anchor = instagram[0] if instagram else (section[-1] if section else heading)
+            self.request('PATCH', 'blocks/' + page['id'] + '/children', {
+                'children': [{'object': 'block', 'type': 'heading_3', 'heading_3': {
+                    'rich_text': [{'type': 'text', 'text': {'content': report_title(day)},
+                                   'annotations': {'bold': True}}],
+                    'is_toggleable': True, 'children': expected}}],
+                'position': {'type': 'after_block', 'after_block': {'id': anchor['id']}},
                 'notifications': {'mode': 'silent'}})
-            found = existing()
-            if len(found) != 1 or not self.matches(found[0], expected):
+            container = self.report_container(page, day)
+            if not container or not self.matches(container, expected):
                 raise NotionReportError('youtube_report_readback_failed')
             outcome = 'inserted'
+        if legacy:
+            # The independent report has been verified. Only its previous nested copy is trashed.
+            removed = self.request('DELETE', 'blocks/' + legacy[0]['id'])
+            if not (removed.get('in_trash') or removed.get('archived')) or any(
+                    row['id'] == legacy[0]['id'] for row in self.children(instagram[0]['id'])):
+                raise NotionReportError('youtube_legacy_cleanup_failed')
+            outcome = 'migrated'
         return {'status': outcome, 'day': day, 'page_id': page['id'], 'page_url': page.get('url'),
-                'container_id': container['id'], 'youtube_block_id': found[0]['id'],
+                'container_id': container['id'], 'youtube_block_id': container['id'],
+                'layout_version': LAYOUT_VERSION,
                 'period_start': summary['period_start'], 'period_end': summary['period_end']}
 
 
@@ -234,26 +270,40 @@ def run(config, cloud=None, now=None, factory=None):
     with report_lease(cloud):
         raw, generation = cloud.get('notion/report-state.json')
         state = json.loads(raw) if raw else {}
-        if state.get('last_report_day') == now.date().isoformat():
+        same_day = state.get('last_report_day') == now.date().isoformat()
+        if same_day and state.get('layout_version') == LAYOUT_VERSION:
             return {'status': 'already_reported', 'day': now.date().isoformat()}
         folder = private_dir(STATE / 'notion-report')
         path = folder / 'comments.sqlite3'
         if not cloud.restore(path):
             raise ReportDeferred('collection_database_missing')
-        summary = summarize(path, now, state.get('covered_through'))
+        covered_through = state.get('covered_through')
+        if same_day:
+            # Reconcile the already published period once when upgrading its layout.
+            from datetime import date, timedelta
+            try:
+                start = date.fromisoformat(state['last_report']['period_start'])
+                end = date.fromisoformat(state['last_report']['period_end'])
+                if start > end or end >= now.date():
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                raise ReportDeferred('report_migration_period_invalid') from None
+            covered_through = (start - timedelta(days=1)).isoformat()
+        summary = summarize(path, now, covered_through)
         client = factory(config) if factory else NotionClient(secret_token(cloud.google, config['token_secret']), config)
         client.verify_connection()
         result = client.publish(summary)
         # Advance coverage only after the exact Notion content has been read back.
         cloud.put('notion/report-state.json', json.dumps({
             'last_report_day': summary['report_day'], 'covered_through': summary['period_end'],
+            'layout_version': LAYOUT_VERSION,
             'last_report': result}, ensure_ascii=False).encode(), generation)
         cloud.put('notion/latest.json', json.dumps(result, ensure_ascii=False).encode())
         return result
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='기존 인스타 댓글 보고 안에 유튜브 요약 추가')
+    parser = argparse.ArgumentParser(description='일일 업무 Develop에 유튜브 댓글 관리 보고')
     parser.add_argument('mode', choices=['run', 'probe'], nargs='?', default='run')
     parser.add_argument('--local', action='store_true', help='등록된 gcloud 운영 계정 사용')
     parser.add_argument('--token-file', type=Path, help='대체 커넥션 토큰의 로컬 비공개 JSON 경로')
@@ -276,8 +326,11 @@ def main(argv=None):
             client = NotionClient(token, config)
             result = client.verify_connection()
             today = datetime.now(KST).date().isoformat()
-            container = client.report_container(client.daily_page(today), today)
-            result.update(status='read_verified', shared_report_found=True, container_id=container['id'])
+            page = client.daily_page(today)
+            client.develop_section(page)
+            container = client.report_container(page, today)
+            result.update(status='read_verified', develop_found=True, report_found=container is not None,
+                          container_id=container['id'] if container else None)
         else:
             result = run(config)
         print(json.dumps(result, ensure_ascii=False))
