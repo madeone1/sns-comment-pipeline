@@ -70,13 +70,39 @@ class ReleaseTests(unittest.TestCase):
         calls=[]
         def gcloud(args, **kwargs):
             calls.append(args)
-            return SimpleNamespace(stdout='SUCCESS' if args[:2]==['builds','describe'] else '')
+            if args[:3] == ['run', 'jobs', 'describe']:
+                return SimpleNamespace(stdout='', returncode=1)
+            return SimpleNamespace(stdout='SUCCESS' if args[:2]==['builds','describe'] else '', returncode=0)
         with mock.patch.object(release,'gcloud',side_effect=gcloud), mock.patch.object(release,'ensure_scheduler_invoker'):
             release.deploy()
         updates=[c for c in calls if c[:3]==['run','jobs','update']]
         self.assertEqual([c[3] for c in updates],['sns-comments-moderate','sns-comments-notion-summary'])
         self.assertTrue(all(not any(a.startswith('--set-env-vars') for a in c) for c in updates))
         self.assertIn('--task-timeout=1500s',updates[0])
+
+    def test_deploy_updates_past_sweep_image_without_replacing_env(self):
+        release.save('candidate-result', {'status': 'verified', 'image': 'registry/worker:new'})
+        calls = []
+        bound = []
+
+        def gcloud(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ['builds', 'describe']:
+                return SimpleNamespace(stdout='SUCCESS', returncode=0)
+            if args[:3] == ['run', 'jobs', 'describe']:
+                return SimpleNamespace(stdout='sns-comments-past-sweep', returncode=0)
+            return SimpleNamespace(stdout='', returncode=0)
+
+        with mock.patch.object(release, 'gcloud', side_effect=gcloud), \
+             mock.patch.object(release, 'ensure_scheduler_invoker', side_effect=bound.append):
+            release.deploy()
+        updates = [c for c in calls if c[:3] == ['run', 'jobs', 'update']]
+        self.assertEqual([c[3] for c in updates],
+                         ['sns-comments-moderate', 'sns-comments-notion-summary', 'sns-comments-past-sweep'])
+        sweep = updates[-1]
+        self.assertIn('--image=registry/worker:new', sweep)
+        self.assertFalse(any(a.startswith('--set-env-vars') or a.startswith('--update-env-vars') or a.startswith('--task-timeout') for a in sweep))
+        self.assertEqual(bound, ['sns-comments-moderate', 'sns-comments-notion-summary'])
 
 
 if __name__ == '__main__':
