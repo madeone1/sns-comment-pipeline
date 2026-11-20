@@ -73,6 +73,7 @@ def verify(day=None,page=None):
 SCHEDULER = 'serviceAccount:sns-scheduler@' + PROJECT + '.iam.gserviceaccount.com'
 INVOKER_JOBS = ('sns-comments-moderate', 'sns-comments-notion-summary')
 SWEEP_JOB = 'sns-comments-past-sweep'
+MONTHLY_COST_JOB = 'sns-comments-monthly-cost'
 
 
 def scheduler_invoker_bound(policy, member=SCHEDULER):
@@ -118,6 +119,7 @@ def deploy():
     for job in INVOKER_JOBS:
         ensure_scheduler_invoker(job)
     update_past_sweep_image(image)
+    update_monthly_cost_image(image)
 
 
 def update_past_sweep_image(image):
@@ -132,6 +134,20 @@ def update_past_sweep_image(image):
         return
     gcloud(['run', 'jobs', 'update', SWEEP_JOB, '--region=' + REGION, '--image=' + image])
     print(json.dumps({'job': SWEEP_JOB, 'image': image, 'env_unchanged': True}))
+
+
+def update_monthly_cost_image(image):
+    """Point the monthly cost job at the new image. Skip it until an admin creates the job.
+
+    Image only. Environment variables, arguments, and the task timeout stay as created.
+    """
+    described = gcloud(['run', 'jobs', 'describe', MONTHLY_COST_JOB, '--region=' + REGION,
+                        '--format=value(metadata.name)'], optional=True)
+    if getattr(described, 'returncode', 1):
+        print(json.dumps({'job': MONTHLY_COST_JOB, 'skipped': True, 'reason': 'not_created'}))
+        return
+    gcloud(['run', 'jobs', 'update', MONTHLY_COST_JOB, '--region=' + REGION, '--image=' + image])
+    print(json.dumps({'job': MONTHLY_COST_JOB, 'image': image, 'env_unchanged': True}))
 
 
 def retire_daily():
