@@ -1,0 +1,8 @@
+{
+  "daily_data_source_id": "74e519dd-0028-4fc0-8dad-f3169636b767",
+  "token_secret": "projects/waterbomb-sns-pipeline/secrets/sns-notion-wsh-token",
+  "expected_connection_name": "WSH",
+  "spreadsheet_id": "11fNxuDWtf3hz9rmNtgeop4YUdR16jCP-ydNn4Mx8M1Q",
+  "schedule": "5 9 * * 1-5",
+  "time_zone": "Asia/Seoul"
+}

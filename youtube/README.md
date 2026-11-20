@@ -9,6 +9,39 @@
 실제 검증 결과는 [VALIDATION.md](VALIDATION.md), 승인된 리소스와 권한은
 [DEPLOYMENT-PLAN.md](DEPLOYMENT-PLAN.md)에 정리한다.
 
+## Notion 댓글 보고
+
+2026-11-20부터 기존 일일 업무의 Develop → `인스타 댓글 관리` 보고 안에
+`🎬 유튜브 댓글` 항목과 이 플랫폼의 시트 링크를 함께 표시한다.
+유튜브 수집기와 별도의 `youtube-comments-notion-summary` 작업이
+평일 09:05 KST에 하루 한 번 실행한다. 기존 인스타 09시 예약은 유지한다.
+
+보고는 전날 작성 댓글 수(월요일은 금~일), 원댓글·대댓글 구분,
+YouTube API 검토 대기·스팸 의심·상태 미제공 수, 전체 수집 확인 시각을 표시한다.
+숨김·유지 판정이나 AI 분석 결과로 해석하지 않는다. 당일 전체 수집과 기존
+인스타 보고가 준비되지 않았으면 보고를 보류하며, 다음 성공 보고에서 미보고 기간을 이어 집계한다.
+같은 날짜의 재실행은 검증한 기존 내용을 대조해 중복을 만들지 않는다.
+
+인증은 기존 `WSH` 커넥션의 `sns-notion-wsh-token` Secret을 재사용한다.
+전용 실행 계정은 수집 DB 스냅샷 한 객체의 읽기, `notion/` 상태 경로의 읽기·쓰기,
+해당 Secret의 읽기만 갖는다. 수집 DB와 YouTube OAuth를 수정할 권한은 추가하지 않는다.
+Notion 보고 설정에는 리소스 참조만 있으며 토큰값은 없다.
+
+```sh
+# youtube/에서 실행. 기존 운영 계정과 Secret의 읽기·현재 보고 위치만 확인
+.venv/bin/python -m youtube_validation.notion_report probe --local
+
+# 전용 이미지 준비·빌드 및 보고 리소스 배포 도구
+.venv/bin/python -m youtube_validation.notion_release --help
+```
+
+코드: `youtube_validation/notion_summary.py`(읽기 전용 집계),
+`notion_report.py`(기존 보고 내 추가·재조회·중복 방지),
+`notion_release.py`(전용 배포), `notion_config.json`(인증값 없는 설정).
+최초 실제 반영·반복 실행 증빙은 Git 제외 `.local/notion-release/`에 보관한다.
+
+## YouTube OAuth 운영
+
 2026-11-16 현재 운영은 [OAuth 소수 사용자 예외 판단과 운영 조건](OAUTH-OPERATING-MODE.md)을 따른다.
 External / In production을 유지하며 민감 범위는 미인증 상태로 소수의 알려진 운영자만 사용한다.
 영상 업로드와 데이터 액세스 심사 제출은 진행하지 않는다.
