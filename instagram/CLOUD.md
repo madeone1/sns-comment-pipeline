@@ -11,6 +11,7 @@
 | 댓글 관리 제한 | 1,500초, 잠금 1,620초, 자동 재시도 0회 |
 | 과거 댓글 점검 | `sns-comments-past-sweep`, 예약 없음, 사람이 실행 버튼을 누를 때만 |
 | 관리 보고 | `sns-comments-notion-summary`, 매일 09시 예약, 코드에서 주말 제외 |
+| 월별 비용 | `sns-comments-monthly-cost`, 매월 1일 10시, Asia/Seoul |
 | 보고 위치 | Notion 일일 업무 Develop의 `인스타 댓글 관리` 토글 |
 | 원문·진행 위치 | `gs://waterbomb-sns-pipeline-state/moderation/polling/계정ID.json` |
 | 기준표 | `1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY`의 숨김 대상·사람 판단 |
@@ -85,7 +86,8 @@ python3 scripts/token_connection_release.py deploy
 ```
 
 같은 이미지의 성공한 검증 증빙이 있어야 댓글 관리와 관리 보고 Job 이미지를 바꾼다.
-과거 댓글 점검 작업이 이미 있으면 그 이미지만 같이 바꾼다. 댓글 관리의
+과거 댓글 점검 작업이 이미 있으면 그 이미지만 같이 바꾼다. 월별 비용 작업이 이미 있으면
+그 이미지도 같이 바꾼다. 댓글 관리의
 제한 시간만 1,500초로 맞추며 기존 기능 스위치·예약 시각은 보존한다. 배포 후 실제
 실행 로그, 대기열·진행 위치와 시트·Notion 상태를 재조회한다.
 
@@ -173,6 +175,110 @@ gcloud run jobs execute sns-comments-past-sweep \
 콘솔에서도 같은 변수에 `SNS_PAST_SWEEP_APPLY`=`apply`를 추가한 뒤 **실행**을 누른다.
 이 값은 이번 실행에만 둔다. 작업에 저장해 두면 다음 버튼이 계속 숨긴다.
 계정 값은 `서울`, `부산`, `속초`, `토론토` 중 하나다.
+
+## 월별 비용 기록
+
+아래 명령은 `instagram` 폴더에서 실행한다.
+매월 1일 오전 10시(한국시간)에 지난달 비용을 노션 `💰 월별 비용 기록`에 적는다.
+직원이 노트북에서 gcloud에 로그인할 필요가 없다. 댓글 관리와 같은 서비스 계정,
+같은 컨테이너 이미지를 쓴다. 명령만 `python -m sns_comment.monthly_cost`이다.
+
+기본은 한국시간 기준 지난달이다. 특정 달을 다시 적을 때는 그 실행에만 `YYYY-MM`을
+붙인다. 작업에 저장해 두면 다음 달에도 그 달만 다시 적는다.
+
+노션의 `합계`는 수식이라 코드가 쓰지 않는다. 같은 달이 이미 `자동`이면 그 행만
+고친다. `수동` 행은 읽기만 하고 바꾸지 않으며, 그 달의 새 행도 만들지 않는다.
+결제 표가 아직 없거나 그 달 사용량이 없으면 성공으로 끝나고 노션에 아무것도
+쓰지 않는다. 숫자를 지어 내지 않는다.
+
+Vertex AI(Gemini)는 `AI 비용`이고, 나머지 서비스는 `구글 클라우드`이다.
+라벨, `goog-resource-type`, Cloud Run 작업 이름, SKU로 인스타그램 작업
+(`sns-comments-moderate`, `sns-comments-notion-summary`, `sns-comments-past-sweep`,
+`sns-comments-webhook`)과 유튜브·병합 작업을 가를 수 있으면 인스타그램만 적는다.
+한 줄이라도 어느 쪽인지 모르면 프로젝트 합계를 적고, 메모에
+`프로젝트 전체, 유튜브 등 포함`이라고 남긴다. 2026년 11월은 결제 내보내기가
+11월 20일에 켜졌으므로 11월 20일 0시(한국시간) 이후만 더하고, 메모에
+`11/20 이후만 집계`라고 남긴다. 통화가 원화가 아니면 내보내기에 있는 환율로만 바꾸고,
+환율이 없으면 기록하지 않는다. 바꾼 경우에는 메모에 원래 통화를 적는다.
+
+환경 변수는 필요한 키만 `--update-env-vars`로 더한다. 환경 변수를 통째로
+갈아끼우지 않는다. 배포 스크립트는 이 작업을 새로 만들지 않는다. 이미 있으면
+이미지만 바꾸고, 환경 변수와 인수는 그대로 둔다.
+
+프로젝트는 `waterbomb-sns-pipeline`, 리전은 `asia-northeast3`이다.
+지금 gcloud에 선택된 프로젝트가 이것과 같은지 확인한 뒤 아래를 순서대로
+한 번만 실행한다.
+
+### 1. 작업 만들기
+
+댓글 관리 이미지를 먼저 배포한 뒤, 그 이미지 주소로 작업을 만든다.
+
+```sh
+IMAGE=$(gcloud run jobs describe sns-comments-moderate --region=asia-northeast3 --format='value(spec.template.spec.template.spec.containers[0].image)')
+gcloud run jobs create sns-comments-monthly-cost \
+  --region=asia-northeast3 \
+  --image="$IMAGE" \
+  --service-account=sns-pipeline@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --command=python \
+  --args=-m,sns_comment.monthly_cost \
+  --tasks=1 --parallelism=1 --max-retries=0 --task-timeout=600s --memory=512Mi --cpu=1 \
+  --update-env-vars=GOOGLE_CLOUD_PROJECT=waterbomb-sns-pipeline,SNS_NOTION_OAUTH_SECRET=projects/waterbomb-sns-pipeline/secrets/sns-notion-oauth
+```
+
+### 2. 결제 표 읽기 권한
+
+데이터셋 명령은 권한을 하나 더한다. 데이터셋에 있던 다른 권한은 지우지 않는다.
+작업 실행 권한은 프로젝트에 하나 더한다. 다른 구성원의 권한은 지우지 않는다.
+
+```sh
+bq query --project_id=waterbomb-sns-pipeline --location=asia-northeast3 --use_legacy_sql=false \
+  'GRANT `roles/bigquery.dataViewer` ON SCHEMA `waterbomb-sns-pipeline`.billing_export TO "serviceAccount:sns-pipeline@waterbomb-sns-pipeline.iam.gserviceaccount.com"'
+gcloud projects add-iam-policy-binding waterbomb-sns-pipeline \
+  --member=serviceAccount:sns-pipeline@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --role=roles/bigquery.jobUser \
+  --condition=None
+```
+
+표 이름은 `billing_export.gcp_billing_export_v1_01152F_3EE377_FB410D`이다.
+결제 계정 `01152F-3EE377-FB410D`의 표준 사용 비용 내보내기이다. 표가 아직
+없어도 작업을 만들 수 있다. 그 달에는 노션에 쓰지 않고 끝난다.
+
+### 3. 매월 1일 10시 예약
+
+스케줄러가 이 작업을 부르려면 실행 권한이 먼저 필요하다. 권한을 통째로
+바꾸지 않고, 스케줄러 계정만 더한다. 댓글 관리 예약과 같은 계정이다.
+
+```sh
+gcloud run jobs add-iam-policy-binding sns-comments-monthly-cost \
+  --region=asia-northeast3 \
+  --member=serviceAccount:sns-scheduler@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+gcloud scheduler jobs create http sns-comments-monthly-cost \
+  --location=asia-northeast3 \
+  --schedule='0 10 1 * *' \
+  --time-zone=Asia/Seoul \
+  --uri='https://run.googleapis.com/v2/projects/waterbomb-sns-pipeline/locations/asia-northeast3/jobs/sns-comments-monthly-cost:run' \
+  --http-method=POST \
+  --oauth-service-account-email=sns-scheduler@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --headers=Content-Type=application/json \
+  --message-body={} \
+  --attempt-deadline=180s \
+  --max-retry-attempts=0
+```
+
+### 특정 달만 다시 적기
+
+이번 실행에만 달을 지정한다. 작업 수정 화면에 인수를 저장하지 않는다.
+
+```sh
+gcloud run jobs execute sns-comments-monthly-cost \
+  --region=asia-northeast3 \
+  --args=-m,sns_comment.monthly_cost,2026-11 \
+  --wait
+```
+
+콘솔: Cloud Run → 작업 → `sns-comments-monthly-cost` → **실행**.
+컨테이너 인수에 `-m` `sns_comment.monthly_cost` `2026-11`을 이번 실행에만 적는다.
 
 GitHub Actions는 Linux·Windows 검증만 실행한다. PR 병합만으로 배포되지 않는다.
 기존 daily용 모듈은 과거 자료·호환 검증을 위해 남아 있으나 `daily_enabled=false`인
