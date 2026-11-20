@@ -55,7 +55,7 @@ def verify(day=None,page=None):
         '--service-account=sns-pipeline@'+PROJECT+'.iam.gserviceaccount.com',
         '--command=python','--args=-m,sns_comment.moderation_release_check','--max-retries=0',
         '--task-timeout=1800s','--memory=512Mi','--cpu=1',
-        '--set-env-vars=GOOGLE_CLOUD_PROJECT='+PROJECT+',SNS_STATE_BUCKET='+PROJECT+
+        '--update-env-vars=GOOGLE_CLOUD_PROJECT='+PROJECT+',SNS_STATE_BUCKET='+PROJECT+
         '-state,SNS_NOTION_OAUTH_SECRET=projects/'+PROJECT+'/secrets/sns-notion-oauth'+
         ',SNS_RELEASE_IMAGE='+image])
     try:
@@ -72,6 +72,7 @@ def verify(day=None,page=None):
 
 SCHEDULER = 'serviceAccount:sns-scheduler@' + PROJECT + '.iam.gserviceaccount.com'
 INVOKER_JOBS = ('sns-comments-moderate', 'sns-comments-notion-summary')
+SWEEP_JOB = 'sns-comments-past-sweep'
 
 
 def scheduler_invoker_bound(policy, member=SCHEDULER):
@@ -116,6 +117,21 @@ def deploy():
         print(json.dumps({'job':job,'image':image,'env_unchanged':True}))
     for job in INVOKER_JOBS:
         ensure_scheduler_invoker(job)
+    update_past_sweep_image(image)
+
+
+def update_past_sweep_image(image):
+    """Point the on-demand sweep at the new image. Skip it until an admin creates the job.
+
+    Image only. Environment variables, arguments, and the task timeout stay as created.
+    """
+    described = gcloud(['run', 'jobs', 'describe', SWEEP_JOB, '--region=' + REGION,
+                        '--format=value(metadata.name)'], optional=True)
+    if getattr(described, 'returncode', 1):
+        print(json.dumps({'job': SWEEP_JOB, 'skipped': True, 'reason': 'not_created'}))
+        return
+    gcloud(['run', 'jobs', 'update', SWEEP_JOB, '--region=' + REGION, '--image=' + image])
+    print(json.dumps({'job': SWEEP_JOB, 'image': image, 'env_unchanged': True}))
 
 
 def retire_daily():
