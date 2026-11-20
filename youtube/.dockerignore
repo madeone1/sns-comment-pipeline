@@ -1,0 +1,8 @@
+# Build only source, non-secret runtime settings and pinned dependencies.
+*
+!Dockerfile
+!.dockerignore
+!requirements.lock.txt
+!youtube_validation/
+!youtube_validation/*.py
+!youtube_validation/pipeline_config.json

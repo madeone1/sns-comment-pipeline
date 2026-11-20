@@ -1,0 +1,9 @@
+# Upload only this platform's container inputs.
+*
+!Dockerfile
+!.dockerignore
+!.gcloudignore
+!requirements.lock.txt
+!youtube_validation/
+!youtube_validation/*.py
+!youtube_validation/pipeline_config.json

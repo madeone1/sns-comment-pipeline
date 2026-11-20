@@ -24,3 +24,18 @@ htmlcov/
 *service-account*.json
 *service_account*.json
 application_default_credentials.json
+
+# OAuth clients, authorized users and downloaded account keys at any depth.
+client.json
+client_secret*.json
+client-secret*.json
+oauth*.json
+*oauth-client*.json
+*oauth_client*.json
+authorized-user*.json
+authorized_user*.json
+token.json
+tokens.json
+secrets.json
+*.p12
+*.pfx

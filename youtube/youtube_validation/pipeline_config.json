@@ -1,0 +1,11 @@
+{
+  "spreadsheet_id": "11fNxuDWtf3hz9rmNtgeop4YUdR16jCP-ydNn4Mx8M1Q",
+  "owner_email": "syan@madeone.kr",
+  "max_requests": 2000,
+  "daily_budget": 8000,
+  "seconds": 2400,
+  "oauth_mode": "production",
+  "schedule": "30 * * * *",
+  "time_zone": "Asia/Seoul",
+  "daily_start": "08:30"
+}
