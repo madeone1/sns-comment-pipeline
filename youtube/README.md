@@ -1,7 +1,7 @@
 # 워터밤 YouTube 댓글 파이프라인
 
-기존 Instagram 코드·설정·인증정보·Cloud Run·Scheduler·시트·Notion과 연결하지 않는
-별도 수집 파이프라인이다. 새 YouTube 전용 시트·실행 계정·버킷·Secret·Job·Scheduler를 사용한다.
+Instagram과 수집 코드·YouTube OAuth·실행 계정·버킷·Job·Scheduler·시트를 분리한
+별도 수집 파이프라인이다. 노션 요약은 아래 설명과 같이 기존 댓글 보고 안에 함께 표시한다.
 `youtube/` 안에 코드·테스트·의존성·운영 문서를 모으고 Python 가상환경도 별도로 둔다.
 기존 `sns_comment` 패키지나 클라우드 배포 도구를 import하지 않는다.
 
