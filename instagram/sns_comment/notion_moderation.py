@@ -822,28 +822,6 @@ def link_instead_of_table(content, database):
     return [{"old_str": tag, "new_str": table_link(database)}]
 
 
-def preserve_youtube_section(toggle, existing):
-    """Keep the independently published YouTube subsection during an Instagram rewrite."""
-    stack, found = [], []
-    for match in re.finditer(r"<(/?)toggle\b[^>]*>", existing):
-        if not match.group(1):
-            stack.append(match.start())
-        elif stack:
-            start = stack.pop()
-            block = existing[start:match.end()]
-            body = re.sub(r"^<toggle\b[^>]*>\s*", "", block)
-            title = re.sub(r"</?b>", "", body.splitlines()[0]).strip()
-            if title == "🎬 유튜브 댓글":
-                found.append(block)
-    if len(found) > 1:
-        raise PilotError("유튜브 댓글 보고가 중복되어 인스타 보고 수정을 보류합니다.")
-    if not found:
-        return toggle
-    if not toggle.endswith("</toggle>"):
-        raise PilotError("댓글 보고의 끝을 확인하지 못했습니다.")
-    return toggle[:-len("</toggle>")].rstrip() + "\n\n" + found[0] + "\n</toggle>"
-
-
 def layout_updates(content, day, hidden, pending_count, database, replace_existing=False, embed_tag=""):
     """Put one table inside the toggle.
 
@@ -863,7 +841,7 @@ def layout_updates(content, day, hidden, pending_count, database, replace_existi
         embed = tag
     elif embed_tag and embed_tag not in content:
         embed = embed_tag
-    toggle = preserve_youtube_section(toggle_markdown(day, hidden, pending_count, embed), existing)
+    toggle = toggle_markdown(day, hidden, pending_count, embed)
     updates = []
     if removal:
         updates.append({"old_str": removal[0], "new_str": removal[1]})
@@ -949,9 +927,8 @@ def install_toggle(mcp, state, page, day, hidden, pending_count, database, finde
                              replace_existing=replace_existing, embed_tag=embed)
     moved = bool(embed and any(embed in change.get("new_str", "") for change in updates))
     tag_here = _owned_database_tag(text, database)
-    markdown = preserve_youtube_section(toggle_markdown(day, hidden, pending_count, embed or (tag_here if tag_here in "".join(
-        change.get("new_str", "") for change in updates) or (tag_here and tag_here in _comment_toggle(text, day)) else "")),
-        _comment_toggle(text, day))
+    markdown = toggle_markdown(day, hidden, pending_count, embed or (tag_here if tag_here in "".join(
+        change.get("new_str", "") for change in updates) or (tag_here and tag_here in _comment_toggle(text, day)) else ""))
     if not apply:
         return {"wrote": False, "updates": updates, "markdown": markdown, "previous": host_id if moved else ""}
     if updates:
