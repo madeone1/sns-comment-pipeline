@@ -285,10 +285,17 @@ gcloud run jobs execute sns-comments-monthly-cost \
 
 아래 명령은 `instagram` 폴더에서 실행한다.
 매월 1일 오전 10시(한국시간)에 최근 약 35일의 Meta·Instagram 변경을 조사한다.
-대상은 캡션, 해시태그, Reels, 광고 문구다. 출처 주소와 날짜가 있는 항목만
+대상은 캡션, 해시태그, Reels, 광고 문구다. 출처 주소와 날짜가 있는 공식 항목만
 기존 페이지 [✍🏻 워터밤 캡션 작성 규정집 | 실무 가이드](https://app.notion.com/p/32c0761a512d8214bf84819e674e6177)
-를 그 자리에서 고친다. 새 페이지는 만들지 않는다. 바뀐 것이 없으면 규정 문장,
+를 그 자리에서 고친다. 새 페이지는 만들지 않는다. 공식 변경이 없으면 규정 문장,
 버전, 변경 기록, DB 속성은 그대로 둔다.
+
+공식 주소는 Instagram·Meta 고객센터, 블로그, @creators, 광고 정책 페이지다.
+업계 매체 기사는 월간 보고의 `업계 매체 보도`에 링크와 날짜만 남기고 규정집은
+고치지 않는다. 인정하는 매체는 Social Media Today, Adweek, Marketing Dive,
+TechCrunch, The Verge, Search Engine Land, Search Engine Journal이다.
+Later, Hootsuite, Sprout Social, Buffer, Metricool, Social Media Examiner처럼
+도구를 파는 회사의 블로그는 출처로 쓰지 않는다.
 
 댓글 관리와 다른 잠금 `state/caption-policy-lease.json`만 잡는다.
 `state/lease.json`과 `state/moderation-lease.json`은 잡지 않으므로, 이 작업이
@@ -303,8 +310,9 @@ gcloud run jobs execute sns-comments-monthly-cost \
 
 보고는 그 규정집 페이지의 Notion 댓글이다. 봉재는 GCP를 열지 않고 페이지
 댓글에서 본다. 연결에 댓글 도구가 없으면 페이지 맨 아래 `메타 정책 월간 점검`
-토글에 같은 글을 남긴다. 정책이 그대로면 그 토글만 생기고 규정 문장은
-바뀌지 않는다. 변경이 없으면 보고 문장은 `이번 달 메타 정책 변경 없음, 규정집 그대로`다.
+토글에 같은 글을 남긴다. 공식 정책이 그대로면 그 토글만 생기고 규정 문장은
+바뀌지 않는다. 공식 변경이 없으면 보고 문장은 `이번 달 메타 정책 변경 없음, 규정집 그대로`다.
+업계 보도만 있으면 그 문장 아래에 `업계 매체 보도`를 붙이고 규정집은 그대로 둔다.
 Cloud Logging에는 `caption_policy_done` 또는 `caption_policy_failed`가 한 줄로 남는다.
 
 환경 변수는 필요한 키만 `--update-env-vars`로 더한다. 통째로 갈아끼우지 않는다.
@@ -315,6 +323,27 @@ Cloud Logging에는 `caption_policy_done` 또는 `caption_policy_failed`가 한 
 지금 gcloud에 선택된 프로젝트가 이것과 같은지 확인한 뒤, 댓글 관리 이미지를
 먼저 배포하고 아래를 순서대로 한 번만 실행한다. 이미지를 배포하기 전에
 작업을 만들면 새 명령이 들어 있지 않다.
+
+작업이 이미 있을 때 이 작업의 이미지만 바꿀 때는 `deploy`를 쓰지 않는다.
+`deploy`는 댓글 관리와 관리 보고의 이미지도 바꾼다. `instagram` 폴더에서
+`prepare`와 `build`만 하고, 빌드가 `SUCCESS`가 된 뒤 이 작업만 가리킨다.
+환경 변수, 인수, 제한 시간, 스케줄러는 그대로 둔다. 환경 변수를 통째로
+바꾸거나 이번 실행용 변수를 작업에 저장하는 옵션은 붙이지 않는다.
+
+```sh
+python3 scripts/token_connection_release.py prepare
+python3 scripts/token_connection_release.py build
+BUILD_ID=$(python3 -c 'import json; print(json.load(open(".local/token-connection-release/build.json"))["id"])')
+gcloud builds describe "$BUILD_ID" --project=waterbomb-sns-pipeline --format='value(status)'
+IMAGE=$(python3 -c 'import json; print(json.load(open(".local/token-connection-release/release.json"))["image"])')
+gcloud run jobs update sns-comments-caption-policy \
+  --image="$IMAGE" \
+  --region=asia-northeast3 \
+  --project=waterbomb-sns-pipeline
+```
+
+`gcloud builds describe`가 `SUCCESS`이기 전에 이미지를 바꾸지 않는다.
+`verify`와 `deploy`는 실행하지 않는다.
 
 ### Notion 공유
 
