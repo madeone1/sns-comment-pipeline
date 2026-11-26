@@ -129,6 +129,33 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(a.startswith('--set-env-vars') or a.startswith('--update-env-vars') or a.startswith('--task-timeout') or a.startswith('--args') for a in updates[-1]))
         self.assertNotIn('sns-comments-past-sweep', [c[3] for c in updates])
 
+    def test_deploy_updates_caption_policy_image_without_replacing_env(self):
+        release.save('candidate-result', {'status': 'verified', 'image': 'registry/worker:new'})
+        calls = []
+
+        def gcloud(args, **kwargs):
+            calls.append(args)
+            if args[:2] == ['builds', 'describe']:
+                return SimpleNamespace(stdout='SUCCESS', returncode=0)
+            if args[:3] == ['run', 'jobs', 'describe'] and args[3] == 'sns-comments-caption-policy':
+                return SimpleNamespace(stdout='sns-comments-caption-policy', returncode=0)
+            if args[:3] == ['run', 'jobs', 'describe']:
+                return SimpleNamespace(stdout='', returncode=1)
+            return SimpleNamespace(stdout='', returncode=0)
+
+        with mock.patch.object(release, 'gcloud', side_effect=gcloud), \
+             mock.patch.object(release, 'ensure_scheduler_invoker'):
+            release.deploy()
+        updates = [c for c in calls if c[:3] == ['run', 'jobs', 'update']]
+        self.assertEqual(updates[-1][3], 'sns-comments-caption-policy')
+        self.assertIn('--image=registry/worker:new', updates[-1])
+        self.assertFalse(any(
+            a.startswith('--set-env-vars') or a.startswith('--update-env-vars')
+            or a.startswith('--task-timeout') or a.startswith('--args') or a.startswith('--command')
+            for a in updates[-1]))
+        self.assertNotIn('sns-comments-monthly-cost', [c[3] for c in updates])
+        self.assertNotIn('sns-comments-past-sweep', [c[3] for c in updates])
+
 
 if __name__ == '__main__':
     unittest.main()

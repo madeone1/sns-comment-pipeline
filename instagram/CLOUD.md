@@ -12,6 +12,7 @@
 | 과거 댓글 점검 | `sns-comments-past-sweep`, 예약 없음, 사람이 실행 버튼을 누를 때만 |
 | 관리 보고 | `sns-comments-notion-summary`, 매일 09시 예약, 코드에서 주말 제외 |
 | 월별 비용 | `sns-comments-monthly-cost`, 매월 1일 10시, Asia/Seoul |
+| 캡션 규정집 | `sns-comments-caption-policy`, 매월 1일 10시, Asia/Seoul |
 | 보고 위치 | Notion 일일 업무 Develop의 `인스타 댓글 관리` 토글 |
 | 원문·진행 위치 | `gs://waterbomb-sns-pipeline-state/moderation/polling/계정ID.json` |
 | 기준표 | `1496AQpUgceCZCNaahpJ89_SSMbiO6nmOtwFi6u4QzMY`의 숨김 대상·사람 판단 |
@@ -194,7 +195,7 @@ gcloud run jobs execute sns-comments-past-sweep \
 Vertex AI(Gemini)는 `AI 비용`이고, 나머지 서비스는 `구글 클라우드`이다.
 라벨, `goog-resource-type`, Cloud Run 작업 이름, SKU로 인스타그램 작업
 (`sns-comments-moderate`, `sns-comments-notion-summary`, `sns-comments-past-sweep`,
-`sns-comments-webhook`)과 유튜브·병합 작업을 가를 수 있으면 인스타그램만 적는다.
+`sns-comments-webhook`, `sns-comments-monthly-cost`, `sns-comments-caption-policy`)과 유튜브·병합 작업을 가를 수 있으면 인스타그램만 적는다.
 한 줄이라도 어느 쪽인지 모르면 프로젝트 합계를 적고, 메모에
 `프로젝트 전체, 유튜브 등 포함`이라고 남긴다. 2026년 11월은 결제 내보내기가
 11월 20일에 켜졌으므로 11월 20일 0시(한국시간) 이후만 더하고, 메모에
@@ -279,6 +280,136 @@ gcloud run jobs execute sns-comments-monthly-cost \
 
 콘솔: Cloud Run → 작업 → `sns-comments-monthly-cost` → **실행**.
 컨테이너 인수에 `-m` `sns_comment.monthly_cost` `2026-11`을 이번 실행에만 적는다.
+
+## 캡션 규정집 동기화
+
+아래 명령은 `instagram` 폴더에서 실행한다.
+매월 1일 오전 10시(한국시간)에 최근 약 35일의 Meta·Instagram 변경을 조사한다.
+대상은 캡션, 해시태그, Reels, 광고 문구다. 출처 주소와 날짜가 있는 항목만
+기존 페이지 [✍🏻 워터밤 캡션 작성 규정집 | 실무 가이드](https://app.notion.com/p/32c0761a512d8214bf84819e674e6177)
+를 그 자리에서 고친다. 새 페이지는 만들지 않는다. 바뀐 것이 없으면 규정 문장,
+버전, 변경 기록, DB 속성은 그대로 둔다.
+
+댓글 관리와 다른 잠금 `state/caption-policy-lease.json`만 잡는다.
+`state/lease.json`과 `state/moderation-lease.json`은 잡지 않으므로, 이 작업이
+30분 댓글 관리를 미루지 않고 그 작업에 밀려 시작을 포기하지도 않는다.
+해시태그 최대 5개(게시 목적에 맞게 고른다, CEO 요청 2026-11-26,
+<https://help.instagram.com/351460621611097>)는 그 날짜보다 나중의 공식 출처가
+다른 한도를 말할 때만 고친다. 공식 출처 없이 기존 규칙을 지우지 않는다.
+
+조사는 Vertex AI Gemini의 Google Search grounding이다. 모델은 운영 설정의
+`cloud.ai_model`이다. 댓글 관리와 같은 서비스 계정, 같은 컨테이너 이미지를
+쓰고 명령만 `python -m sns_comment.caption_policy`이다.
+
+보고는 그 규정집 페이지의 Notion 댓글이다. 봉재는 GCP를 열지 않고 페이지
+댓글에서 본다. 연결에 댓글 도구가 없으면 페이지 맨 아래 `메타 정책 월간 점검`
+토글에 같은 글을 남긴다. 정책이 그대로면 그 토글만 생기고 규정 문장은
+바뀌지 않는다. 변경이 없으면 보고 문장은 `이번 달 메타 정책 변경 없음, 규정집 그대로`다.
+Cloud Logging에는 `caption_policy_done` 또는 `caption_policy_failed`가 한 줄로 남는다.
+
+환경 변수는 필요한 키만 `--update-env-vars`로 더한다. 통째로 갈아끼우지 않는다.
+배포 스크립트는 이 작업과 스케줄을 새로 만들지 않는다. 이미 있으면 이미지만
+바꾸고, 환경 변수·인수·제한 시간·예약은 그대로 둔다.
+
+프로젝트는 `waterbomb-sns-pipeline`, 리전은 `asia-northeast3`이다.
+지금 gcloud에 선택된 프로젝트가 이것과 같은지 확인한 뒤, 댓글 관리 이미지를
+먼저 배포하고 아래를 순서대로 한 번만 실행한다. 이미지를 배포하기 전에
+작업을 만들면 새 명령이 들어 있지 않다.
+
+### Notion 공유
+
+파이프라인이 쓰는 연결은 Secret Manager `sns-notion-oauth`의 MCP OAuth이고,
+Notion에 보이는 이름은 `MADEONE SNS Comments Pipeline`이다. 일일 업무 병합용
+`WSH`(`sns-notion-wsh-token`)가 아니다.
+
+이 저장소를 만든 환경의 Cursor Notion 연결(integration
+`1f8d872b-594c-80a4-b2f4-00370af2b13f`)은 대상 페이지, 상위 페이지
+<https://app.notion.com/p/26bfd25c45914b27b3af0bf98197ba5b>, 그리고 파이프라인의
+댓글 규정집 페이지를 모두 열지 못했다(404). 그 연결은 파이프라인 연결이 아니다.
+이 환경에는 gcloud가 없어 `sns-notion-oauth`를 읽어 확인하지 못했다.
+
+첫 실행 로그가 `caption_policy_access_denied`이면 Notion에서 아래 두 페이지를
+연 뒤 공유에 `MADEONE SNS Comments Pipeline`을 편집 가능으로 초대한다.
+행 속성을 고치므로 `규정집 목록` 데이터베이스도 같은 연결에 공유한다.
+
+- <https://app.notion.com/p/32c0761a512d8214bf84819e674e6177>
+- <https://app.notion.com/p/26bfd25c45914b27b3af0bf98197ba5b>
+
+연결 목록에 그 이름이 없으면 `connect-notion.command`로 규정집이 있는
+워크스페이스에서 다시 승인한 뒤 같은 공유를 한다. 다른 주소
+`4000761a512d81928337dc6fb5754951`는 수정하지 않는다.
+
+### 1. 작업 만들기
+
+```sh
+IMAGE=$(gcloud run jobs describe sns-comments-moderate --region=asia-northeast3 --format='value(spec.template.spec.template.spec.containers[0].image)')
+gcloud run jobs create sns-comments-caption-policy \
+  --region=asia-northeast3 \
+  --image="$IMAGE" \
+  --service-account=sns-pipeline@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --command=python \
+  --args=-m,sns_comment.caption_policy \
+  --tasks=1 --parallelism=1 --max-retries=0 --task-timeout=900s --memory=512Mi --cpu=1 \
+  --update-env-vars=GOOGLE_CLOUD_PROJECT=waterbomb-sns-pipeline,SNS_STATE_BUCKET=waterbomb-sns-pipeline-state,SNS_NOTION_OAUTH_SECRET=projects/waterbomb-sns-pipeline/secrets/sns-notion-oauth
+```
+
+`SNS_CAPTION_POLICY_DRY_RUN`은 작업에 저장하지 않는다. 저장하면 매월 실행이
+계속 미리보기만 한다.
+
+### 2. 매월 1일 10시 예약
+
+스케줄러가 이 작업을 부르려면 실행 권한이 먼저 필요하다. 권한을 통째로
+바꾸지 않고, 댓글 관리 예약과 같은 스케줄러 계정만 더한다.
+
+```sh
+gcloud run jobs add-iam-policy-binding sns-comments-caption-policy \
+  --region=asia-northeast3 \
+  --member=serviceAccount:sns-scheduler@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+gcloud scheduler jobs create http sns-comments-caption-policy \
+  --location=asia-northeast3 \
+  --schedule='0 10 1 * *' \
+  --time-zone=Asia/Seoul \
+  --uri='https://run.googleapis.com/v2/projects/waterbomb-sns-pipeline/locations/asia-northeast3/jobs/sns-comments-caption-policy:run' \
+  --http-method=POST \
+  --oauth-service-account-email=sns-scheduler@waterbomb-sns-pipeline.iam.gserviceaccount.com \
+  --headers=Content-Type=application/json \
+  --message-body={} \
+  --attempt-deadline=180s \
+  --max-retry-attempts=0
+```
+
+### 배포 직후 한 번 실행
+
+미리보기는 노션에 쓰지 않는다. 로그에 `미리보기입니다`와 `caption_policy_done`이
+보이면 된다. 이 환경 변수는 이번 실행에만 둔다. 작업 수정 화면에 저장하지 않는다.
+실행이 끝난 뒤 작업 환경 변수에 `SNS_CAPTION_POLICY_DRY_RUN`이 남아 있으면 지운다.
+
+```sh
+gcloud run jobs execute sns-comments-caption-policy \
+  --region=asia-northeast3 \
+  --update-env-vars=SNS_CAPTION_POLICY_DRY_RUN=1 \
+  --wait
+```
+
+미리보기에서 출처와 반영 위치가 맞으면 같은 방식으로 한 번 실제로 실행한다.
+인수를 바꾸지 않는다. `SNS_CAPTION_POLICY_DRY_RUN`도 넣지 않는다.
+
+```sh
+gcloud run jobs execute sns-comments-caption-policy \
+  --region=asia-northeast3 \
+  --wait
+```
+
+콘솔에서 수동 실행: [Cloud Run 작업 실행 목록](https://console.cloud.google.com/run/jobs/details/asia-northeast3/sns-comments-caption-policy/executions?project=waterbomb-sns-pipeline).
+미리보기는 이번 실행의 환경 변수에만 `SNS_CAPTION_POLICY_DRY_RUN`=`1`을 적는다.
+
+### 어디를 보면 되는지
+
+- 작업 실행: [sns-comments-caption-policy 실행](https://console.cloud.google.com/run/jobs/details/asia-northeast3/sns-comments-caption-policy/executions?project=waterbomb-sns-pipeline)
+- 예약: [Cloud Scheduler](https://console.cloud.google.com/cloudscheduler?project=waterbomb-sns-pipeline)의 `sns-comments-caption-policy`. 크론 `0 10 1 * *`, 시간대 `Asia/Seoul`.
+- 로그: [Cloud Logging](https://console.cloud.google.com/logs/query;query=resource.type%3D%22cloud_run_job%22%0Aresource.labels.job_name%3D%22sns-comments-caption-policy%22%0AtextPayload%3A%22caption_policy_%22?project=waterbomb-sns-pipeline). 성공은 `caption_policy_done`, 실패는 `caption_policy_failed`, 권한은 `caption_policy_access_denied`, 이미 실행 중이면 `caption_policy_deferred`다.
+- 노션 보고: [캡션 규정집](https://app.notion.com/p/32c0761a512d8214bf84819e674e6177) 페이지 댓글. 댓글 도구가 없으면 같은 페이지 맨 아래 `메타 정책 월간 점검` 토글.
 
 GitHub Actions는 Linux·Windows 검증만 실행한다. PR 병합만으로 배포되지 않는다.
 기존 daily용 모듈은 과거 자료·호환 검증을 위해 남아 있으나 `daily_enabled=false`인
