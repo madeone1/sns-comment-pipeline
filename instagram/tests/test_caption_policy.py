@@ -35,7 +35,7 @@ def page_text(extra=""):
 담당: SNS
 목표: 캡션 품질
 적용: 인스타그램 게시물
-버전: WB-CAPTION-2.5
+버전: WB-CAPTION-3.0
 진행 상태: 사용 중
 개정일: 2026-11-26
 변경 근거: CEO 요청 https://help.instagram.com/351460621611097
@@ -47,10 +47,12 @@ def page_text(extra=""):
 # 2. 범위
 인스타그램 피드와 릴스 캡션에 적용한다.
 
+### WB-CAPTION-2.4 적용과 검증
+예전 2.4 절 제목은 섹션 번호로 읽히지 않는다.
+
 # 3. 캡션 작성 순서
 ① 후크
 ② 본문
-""" + HASHTAG + """
 ④ 위치
 ⑤ 링크
 ⑥ 점검
@@ -59,7 +61,7 @@ def page_text(extra=""):
 구어체로 쓴다.
 
 # 5. 금지
-금지어를 본문에 넣지 않는다.
+금지어 규칙은 데이터베이스에 있다.
 
 # 6. AI 작성 지침
 AI 초안은 사람이 고친 뒤 게시한다.
@@ -69,19 +71,46 @@ AI 초안은 사람이 고친 뒤 게시한다.
 
 # 8. 진행 결과 정리하기
 
-| 날짜 | 버전 | 변경 | 근거 |
+| 버전 | 개정일 | 변경 | 근거 |
 | --- | --- | --- | --- |
-| 2026-11-01 | WB-CAPTION-2.4 | 초안 | https://help.instagram.com/351460621611097 |
-| 2026-11-26 | WB-CAPTION-2.5 | 해시태그 최대 5개 | https://help.instagram.com/351460621611097 |
-""" + extra
+| WB-CAPTION-2.4 | 2026-11-01 | 초안 | https://help.instagram.com/351460621611097 |
+| WB-CAPTION-3.0 | 2026-11-26 | 해시태그 최대 5개 | https://help.instagram.com/351460621611097 |
+
+<toggle>
+🛠️ 유지보수
+
+규칙 행은 지우지 않고 사용 칸으로 끈다.
+</toggle>
+""" + extra + """
+<toggle>
+메타 정책 월간 점검
+
+이전 점검 보고
+</toggle>
+"""
     props = json.dumps({
-        "이름": TITLE, "버전": "WB-CAPTION-2.5",
-        "마지막 수정": "2026-11-26", "마지막 수정자": "봉재",
+        "이름": TITLE,
+        "마지막 수정": "2026-11-26",
+        "마지막 수정자 / 반영 방식": "수동",
     }, ensure_ascii=False)
     return (
         '<page url="' + PAGE_URL + '">\n<properties>\n' + props + '\n</properties>\n<content>\n'
         + body + '\n</content>\n</page>'
     )
+
+
+def sample_rules():
+    return [
+        {"url": "https://app.notion.com/p/c01rule", "title": "목적", "code": "C01", "order": 1,
+         "description": "게시 목적에 맞는 문장만 쓴다.", "source": "", "active": True, "history": "", "status": "사용 중"},
+        {"url": "https://app.notion.com/p/c14rule", "title": "해시태그 5개", "code": "C14", "order": 14,
+         "description": HASHTAG, "source": PROTECTED_SOURCE, "active": True,
+         "history": "2026-11-26 CEO 요청", "status": "사용 중"},
+        {"url": "https://app.notion.com/p/c05rule", "title": "금지어", "code": "C05", "order": 5,
+         "description": "금지어를 본문에 넣지 않는다.", "source": "", "active": True, "history": "", "status": "사용 중"},
+        {"url": "https://app.notion.com/p/c21rule", "title": "마지막 규칙", "code": "C21", "order": 21,
+         "description": "AI 초안은 사람이 고친 뒤 게시한다.", "source": "", "active": True, "history": "", "status": "사용 중"},
+    ]
 
 
 def fetched(text):
@@ -116,14 +145,22 @@ class MemoryState:
 
 
 class Notion:
-    def __init__(self, text=None, fail_fetch=None, fail_comment=False):
+    def __init__(self, text=None, fail_fetch=None, fail_comment=False, rules=None):
         self.text = text if text is not None else page_text()
         self.calls = []
         self.fail_fetch = fail_fetch
         self.fail_comment = fail_comment
+        self.rules = sample_rules() if rules is None else rules
 
     def call(self, name, args):
         self.calls.append((name, args))
+        if name == "query-data-sources":
+            return {"results": [
+                {"url": row["url"], "규칙": row["title"], "코드": row["code"], "순서": row["order"],
+                 "설명": row["description"], "근거/출처": row["source"],
+                 "사용": "__YES__" if row["active"] else "__NO__", "변경 기록": row["history"], "상태": row["status"]}
+                for row in self.rules
+            ], "has_more": False}
         if name == "fetch":
             if self.fail_fetch is not None and args.get("id") == PAGE_URL:
                 raise self.fail_fetch
@@ -246,22 +283,29 @@ class PlanTests(unittest.TestCase):
             {"web": {"domain": "about.instagram.com", "uri": REELS_URL}},
             {"web": {"domain": "facebook.com", "uri": AD_URL}},
         ]}, dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
-        self.assertEqual(plan["version"], "WB-CAPTION-2.5")
-        self.assertEqual(plan["next_version"], "WB-CAPTION-2.6")
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
+        self.assertEqual(plan["version"], "WB-CAPTION-3.0")
+        self.assertEqual(plan["next_version"], "WB-CAPTION-3.1")
         preview = self.page["content"]
         for change in plan["content_updates"]:
             self.assertEqual(preview.count(change["old_str"]), 1)
             preview = preview.replace(change["old_str"], change["new_str"], 1)
-        self.assertIn("WB-CAPTION-2.6", preview)
+        self.assertIn("WB-CAPTION-3.1", preview)
+        self.assertIn("| WB-CAPTION-3.1 | 2026-12-01 |", preview)
         self.assertIn("WB-CAPTION-2.4", preview)
-        self.assertIn(HASHTAG, preview)
+        self.assertIn("### WB-CAPTION-2.4 적용과 검증", preview)
+        self.assertIn("유지보수", preview)
         self.assertIn(PROTECTED_SOURCE, preview)
-        self.assertIn("업데이트: 2026-12-01 | 요청자: 메타 정책 월간 점검 | 반영: 캡션 규정 동기화 | 이번 변경:", preview)
-        self.assertIn("릴스 캡션은 첫 줄에 핵심을 둔다.", preview)
+        before, changelog = preview.split("# 8. 진행 결과 정리하기", 1)
+        self.assertNotIn("릴스 캡션은 첫 줄에 핵심을 둔다.", before)
+        self.assertIn("C22 릴스 캡션은 첫 줄에 핵심을 둔다.", changelog)
         self.assertIn("자동 점검", preview)
-        self.assertEqual(plan["properties"]["버전"], "WB-CAPTION-2.6")
-        self.assertEqual(plan["properties"]["마지막 수정자"], "캡션 규정 동기화")
+        codes = [change["properties"]["코드"] for change in plan["rule_changes"]]
+        self.assertEqual(codes, ["C22", "C23"])
+        self.assertTrue(all(change["op"] == "create" and change["properties"]["사용"] == "__YES__" for change in plan["rule_changes"]))
+        self.assertNotIn("버전", plan["properties"])
+        self.assertNotIn("마지막 수정자", plan["properties"])
+        self.assertEqual(plan["properties"]["마지막 수정자 / 반영 방식"], "캡션 규정 동기화")
         self.assertEqual(plan["properties"]["마지막 수정"], "2026-12-01")
         self.assertTrue(all(set(change) == {"old_str", "new_str"} for change in plan["content_updates"]))
 
@@ -276,16 +320,20 @@ class PlanTests(unittest.TestCase):
             {"web": {"domain": "about.instagram.com", "uri": REELS_URL}},
             {"web": {"domain": "adweek.com", "uri": trade["source_url"]}},
         ]}, dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
         preview = self.page["content"]
         for change in plan["content_updates"]:
             preview = preview.replace(change["old_str"], change["new_str"], 1)
-        self.assertIn("릴스 캡션은 첫 줄에 핵심을 둔다.", preview)
+        before, changelog = preview.split("# 8. 진행 결과 정리하기", 1)
+        self.assertNotIn("릴스 캡션은 첫 줄에 핵심을 둔다.", before)
+        self.assertIn("C22 릴스 캡션은 첫 줄에 핵심을 둔다.", changelog)
         self.assertNotIn("애드위크가 전한 캡션 길이", preview)
+        self.assertEqual(plan["rule_changes"][0]["properties"]["설명"], "릴스 캡션은 첫 줄에 핵심을 둔다.")
+        self.assertEqual(len(plan["rule_changes"]), 1)
         self.assertIn("업계 매체 보도", plan["report"])
         self.assertIn("https://adweek.com/social-marketing/instagram-caption-change", plan["report"])
         self.assertIn("2026-11-19", plan["report"])
-        self.assertEqual(plan["next_version"], "WB-CAPTION-2.6")
+        self.assertEqual(plan["next_version"], "WB-CAPTION-3.1")
 
     def test_trade_press_cannot_change_the_five_hashtag_rule(self):
         raw = finding(
@@ -293,14 +341,14 @@ class PlanTests(unittest.TestCase):
             topic="hashtags", day="2026-11-27", old=HASHTAG, action="revise",
         )
         kept, _dropped = keep_findings([raw], grounded("socialmediatoday.com", TRADE_URL), dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
         self.assertEqual(plan["content_updates"], [])
+        self.assertEqual(plan["rule_changes"], [])
         self.assertEqual(plan["applied"], [])
         self.assertIn(UNCHANGED_LINE, plan["report"])
         self.assertIn("업계 매체 보도", plan["report"])
         self.assertIn("https://socialmediatoday.com/news/instagram-hashtag-count", plan["report"])
         self.assertIn("2026-11-27", plan["report"])
-        self.assertNotIn("최대 30개", self.page["content"])
 
     def test_a_later_official_source_can_replace_the_hashtag_sentence(self):
         raw = finding(
@@ -309,14 +357,15 @@ class PlanTests(unittest.TestCase):
             topic="hashtags", day="2026-11-27", old=HASHTAG, action="revise", section=3,
         )
         kept, _dropped = keep_findings([raw], grounded("help.instagram.com", OFFICIAL_CAP_URL), dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
-        preview = self.page["content"]
-        for change in plan["content_updates"]:
-            preview = preview.replace(change["old_str"], change["new_str"], 1)
-        self.assertNotIn("at most 5", preview.split("# 4.")[0])
-        self.assertIn("최대 30개", preview)
-        self.assertIn(PROTECTED_SOURCE, preview)
-        self.assertIn("WB-CAPTION-2.4", preview)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
+        change = plan["rule_changes"][0]
+        self.assertEqual(change["op"], "update")
+        self.assertEqual(change["code"], "C14")
+        self.assertIn("최대 30개", change["properties"]["설명"])
+        self.assertIn(PROTECTED_SOURCE, change["properties"]["근거/출처"])
+        self.assertNotIn("사용", change["properties"])
+        self.assertIn(PROTECTED_SOURCE, self.page["content"])
+        self.assertIn("WB-CAPTION-2.4", self.page["content"])
 
     def test_the_same_help_article_on_the_ceo_date_does_not_move_the_cap(self):
         raw = finding(
@@ -324,8 +373,9 @@ class PlanTests(unittest.TestCase):
             topic="hashtags", day="2026-11-26", old=HASHTAG, action="revise",
         )
         kept, _dropped = keep_findings([raw], grounded("help.instagram.com", PROTECTED_SOURCE), dt.date(2026, 10, 22), dt.date(2026, 11, 26))
-        plan = plan_updates(self.page, kept, [], dt.date(2026, 11, 26))
+        plan = plan_updates(self.page, kept, [], dt.date(2026, 11, 26), sample_rules())
         self.assertEqual(plan["content_updates"], [])
+        self.assertEqual(plan["rule_changes"], [])
         self.assertEqual(plan["skipped"][0]["reason"], "protected_hashtag_rule")
 
     def test_a_non_official_source_cannot_delete_an_existing_rule(self):
@@ -335,18 +385,34 @@ class PlanTests(unittest.TestCase):
             topic="captions", action="remove", old=sentence, section=5,
         )
         kept, _dropped = keep_findings([raw], grounded("socialmediatoday.com", TRADE_URL), dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
         self.assertEqual(plan["content_updates"], [])
+        self.assertEqual(plan["rule_changes"], [])
         self.assertEqual(plan["applied"], [])
         self.assertIn("업계 매체 보도", plan["report"])
         self.assertIn("https://socialmediatoday.com/news/instagram-hashtag-count", plan["report"])
-        self.assertIn(sentence, self.page["content"])
+
+    def test_an_official_retirement_unchecks_use_and_does_not_delete_the_row(self):
+        sentence = "금지어를 본문에 넣지 않는다."
+        raw = finding(
+            "https://help.instagram.com/123456789012345", "금지어 규칙을 공식 폐지했다.", "금지어 규칙을 폐지한다.",
+            topic="captions", action="remove", old=sentence, section=5, day="2026-11-28",
+        )
+        kept, _dropped = keep_findings([raw], grounded("help.instagram.com", raw["source_url"]), dt.date(2026, 10, 27), TODAY)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
+        change = plan["rule_changes"][0]
+        self.assertEqual(change["op"], "retire")
+        self.assertEqual(change["code"], "C05")
+        self.assertEqual(change["properties"]["사용"], "__NO__")
+        self.assertNotIn("delete", [item["op"] for item in plan["rule_changes"]])
+        c14 = [item for item in plan["rule_changes"] if item["code"] == "C14"]
+        self.assertEqual(c14, [])
 
     def test_text_already_in_the_page_is_not_edited(self):
         sentence = "AI 초안은 사람이 고친 뒤 게시한다."
         raw = finding(REELS_URL, sentence, sentence, topic="captions", section=6)
         kept, _dropped = keep_findings([raw], grounded("about.instagram.com", REELS_URL), dt.date(2026, 10, 27), TODAY)
-        plan = plan_updates(self.page, kept, [], TODAY)
+        plan = plan_updates(self.page, kept, [], TODAY, sample_rules())
         self.assertEqual(plan["content_updates"], [])
         self.assertEqual(plan["skipped"][0]["reason"], "already_present")
         self.assertIn(UNCHANGED_LINE, plan["report"])
@@ -357,7 +423,7 @@ class PlanTests(unittest.TestCase):
         raw = finding(REELS_URL, "릴스 캡션은 첫 줄이 잘린다.", "릴스 캡션은 첫 줄에 핵심을 둔다.", section=3)
         kept, _dropped = keep_findings([raw], grounded("about.instagram.com", REELS_URL), dt.date(2026, 10, 27), TODAY)
         with self.assertRaises(PolicyError):
-            plan_updates(page, kept, [], TODAY)
+            plan_updates(page, kept, [], TODAY, sample_rules())
 
     def test_an_html_changelog_row_is_appended(self):
         table = "<table><tr><td>날짜</td><td>버전</td><td>변경</td><td>근거</td></tr></table>"
@@ -393,12 +459,18 @@ class RunTests(unittest.TestCase):
         edits = commands(notion, "update_content")
         self.assertEqual(len(edits), 1)
         self.assertNotIn("replace_content", [args.get("command") for _name, args in notion.calls])
-        props = commands(notion, "update_properties")
-        self.assertEqual(props[0]["properties"]["버전"], "WB-CAPTION-2.6")
+        props = [args for args in commands(notion, "update_properties") if args.get("page_id") == PAGE_URL]
+        self.assertNotIn("버전", props[0]["properties"])
+        self.assertEqual(props[0]["properties"]["마지막 수정자 / 반영 방식"], "캡션 규정 동기화")
+        created = [args for name, args in notion.calls if name == "create-pages"]
+        self.assertEqual(created[0]["pages"][0]["properties"]["코드"], "C22")
+        self.assertEqual(created[0]["pages"][0]["properties"]["사용"], "__YES__")
         comments = [args for name, args in notion.calls if name == "create-comment"]
         self.assertIn(REELS_URL, comments[0]["markdown"])
-        self.assertIn("WB-CAPTION-2.6", notion.text)
-        self.assertIn(HASHTAG, notion.text)
+        self.assertIn("C22", comments[0]["markdown"])
+        self.assertIn("WB-CAPTION-3.1", notion.text)
+        before = notion.text.split("# 8. 진행 결과 정리하기", 1)[0]
+        self.assertNotIn("릴스 캡션은 첫 줄에 핵심을 둔다.", before)
         self.assertNotIn(MODERATION_LEASE, json.dumps([name for name, _args in notion.calls]))
 
     def test_the_job_takes_only_the_caption_lease(self):
@@ -443,8 +515,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("미리보기입니다", logs)
         self.assertIn('"outcome": "dry_run"', logs)
-        self.assertEqual([name for name, _args in notion.calls if name != "fetch"], [])
-        self.assertNotIn("WB-CAPTION-2.6", notion.text)
+        self.assertEqual([name for name, _args in notion.calls if name not in {"fetch", "query-data-sources"}], [])
+        self.assertNotIn("WB-CAPTION-3.1", notion.text)
 
     def test_trade_only_report_does_not_edit_the_rulebook(self):
         notion = Notion()
@@ -464,7 +536,7 @@ class RunTests(unittest.TestCase):
         self.assertIn("업계 매체 보도", comment)
         self.assertIn("https://socialmediatoday.com/news/instagram-hashtag-count", comment)
         self.assertIn("2026-11-20", comment)
-        self.assertNotIn("WB-CAPTION-2.6", notion.text)
+        self.assertNotIn("WB-CAPTION-3.1", notion.text)
 
     def test_no_change_posts_the_exact_line_and_does_not_edit_rules(self):
         notion = Notion()
@@ -489,12 +561,13 @@ class RunTests(unittest.TestCase):
         code, logs, notion = self._run(notion, researcher)
         self.assertEqual(code, 0)
         self.assertIn('"report_channel": "toggle"', logs)
-        inserted = commands(notion, "insert_content")
-        self.assertEqual(len(inserted), 1)
-        self.assertIn(UNCHANGED_LINE, inserted[0]["content"])
-        self.assertIn("메타 정책 월간 점검", inserted[0]["content"])
-        self.assertEqual(commands(notion, "update_content"), [])
-        self.assertNotIn("WB-CAPTION-2.6", notion.text)
+        edited = commands(notion, "update_content")
+        self.assertEqual(len(edited), 1)
+        replacement = edited[0]["content_updates"][0]["new_str"]
+        self.assertIn(UNCHANGED_LINE, replacement)
+        self.assertIn("메타 정책 월간 점검", replacement)
+        self.assertEqual(commands(notion, "insert_content"), [])
+        self.assertNotIn("WB-CAPTION-3.1", notion.text)
 
     def test_access_denied_names_the_share_step_and_skips_research(self):
         notion = Notion(fail_fetch=McpToolError("fetch", {"structuredContent": {"code": "object_not_found", "status": 404}}))
@@ -512,7 +585,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(commands(notion, "update_content"), [])
 
     def test_a_stale_property_after_a_written_row_is_repaired_without_a_new_version(self):
-        extra = "| 2026-12-01 | WB-CAPTION-2.6 | 릴스 (자동 점검) | " + REELS_URL + " |\n"
+        extra = "| WB-CAPTION-3.0 | 2026-12-01 | 릴스 (자동 점검) | " + REELS_URL + " |\n"
         notion = Notion(page_text(extra))
 
         def researcher(start, end):

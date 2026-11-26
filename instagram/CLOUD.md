@@ -291,8 +291,14 @@ gcloud run jobs execute sns-comments-monthly-cost \
 버전, 변경 기록, DB 속성은 그대로 둔다.
 
 공식 주소는 Instagram·Meta 고객센터, 블로그, @creators, 광고 정책 페이지다.
-업계 매체 기사는 월간 보고의 `업계 매체 보도`에 링크와 날짜만 남기고 규정집은
-고치지 않는다. 인정하는 매체는 Social Media Today, Adweek, Marketing Dive,
+규칙의 본문은 페이지 안 `캡션 작성 규칙` 데이터베이스가 기준이다. 새 규칙은
+다음 코드와 순서로 행을 추가하고, 있는 규칙은 설명·근거/출처·변경 기록을 고친다.
+행은 지우지 않는다. 규칙을 빼면 `사용`만 끈다. C14(해시태그 최대 5개)는
+2026-11-26보다 나중의 공식 출처가 다른 한도를 말할 때만 고친다. 규정집 목록의
+속성은 `마지막 수정`과 `마지막 수정자 / 반영 방식`이고, `버전` 속성은 없다.
+버전은 상단 콜아웃과 8절 변경 기록(버전, 개정일, 변경, 근거)에만 올린다.
+업계 매체 기사는 월간 보고의 `업계 매체 보도`에 링크와 날짜만 남기고 규정집과
+규칙 표는 고치지 않는다. 인정하는 매체는 Social Media Today, Adweek, Marketing Dive,
 TechCrunch, The Verge, Search Engine Land, Search Engine Journal이다.
 Later, Hootsuite, Sprout Social, Buffer, Metricool, Social Media Examiner처럼
 도구를 파는 회사의 블로그는 출처로 쓰지 않는다.
