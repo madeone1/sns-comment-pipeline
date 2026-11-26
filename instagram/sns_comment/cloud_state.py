@@ -19,6 +19,10 @@ runs. state/notion-oauth-lease.json covers only the Notion refresh-token write.
 
 state/sheet-hide-lease.json and state/sheet-review-lease.json cover one rulebook
 tab each. Numbering and the insert happen inside that lock, then the lock is released.
+
+state/caption-policy-lease.json is only the monthly caption rulebook sync.
+It does not cover moderation objects. That job must not take state/lease.json
+or state/moderation-lease.json, and the comment jobs do not take this lock.
 """
 
 import contextlib
@@ -44,6 +48,7 @@ NOTION_SUMMARY_LEASE = "state/notion-summary-lease.json"
 NOTION_OAUTH_LEASE = "state/notion-oauth-lease.json"
 SHEET_HIDE_LEASE = "state/sheet-hide-lease.json"
 SHEET_REVIEW_LEASE = "state/sheet-review-lease.json"
+CAPTION_POLICY_LEASE = "state/caption-policy-lease.json"
 
 
 class CloudError(PilotError):
@@ -69,22 +74,22 @@ class GoogleTransport:
                 raise CloudError("Cloud Run 서비스 계정 인증 실패") from None
         return self._token
 
-    def request(self, method, url, data=None, content_type="application/json"):
+    def request(self, method, url, data=None, content_type="application/json", timeout=120):
         host = urllib.parse.urlsplit(url).hostname or ""
         if not url.startswith("https://") or not (host.endswith(".googleapis.com") or host == "storage.googleapis.com"):
             raise CloudError("허용되지 않은 클라우드 API")
         req = urllib.request.Request(url, data=data,
             headers={"Authorization": "Bearer " + self.token(), "Content-Type": content_type}, method=method)
         try:
-            with self.opener.open(req, timeout=120) as response:
+            with self.opener.open(req, timeout=timeout) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
             raise CloudError("클라우드 API 요청 실패", error.code) from None
         except OSError:
             raise CloudError("클라우드 통신 실패") from None
 
-    def json(self, method, url, value=None):
-        raw = self.request(method, url, json.dumps(value, ensure_ascii=False).encode() if value is not None else None)
+    def json(self, method, url, value=None, timeout=120):
+        raw = self.request(method, url, json.dumps(value, ensure_ascii=False).encode() if value is not None else None, timeout=timeout)
         return json.loads(raw) if raw else {}
 
 

@@ -44,6 +44,7 @@ INSTAGRAM_MARKERS = (
     "sns-comments-past-sweep",
     "sns-comments-webhook",
     "sns-comments-monthly-cost",
+    "sns-comments-caption-policy",
     "sns-comments",
 )
 OTHER_MARKERS = (

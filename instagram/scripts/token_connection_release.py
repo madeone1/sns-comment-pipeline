@@ -74,6 +74,7 @@ SCHEDULER = 'serviceAccount:sns-scheduler@' + PROJECT + '.iam.gserviceaccount.co
 INVOKER_JOBS = ('sns-comments-moderate', 'sns-comments-notion-summary')
 SWEEP_JOB = 'sns-comments-past-sweep'
 MONTHLY_COST_JOB = 'sns-comments-monthly-cost'
+CAPTION_POLICY_JOB = 'sns-comments-caption-policy'
 
 
 def scheduler_invoker_bound(policy, member=SCHEDULER):
@@ -120,6 +121,7 @@ def deploy():
         ensure_scheduler_invoker(job)
     update_past_sweep_image(image)
     update_monthly_cost_image(image)
+    update_caption_policy_image(image)
 
 
 def update_past_sweep_image(image):
@@ -148,6 +150,21 @@ def update_monthly_cost_image(image):
         return
     gcloud(['run', 'jobs', 'update', MONTHLY_COST_JOB, '--region=' + REGION, '--image=' + image])
     print(json.dumps({'job': MONTHLY_COST_JOB, 'image': image, 'env_unchanged': True}))
+
+
+def update_caption_policy_image(image):
+    """Point the caption rulebook job at the new image. Skip it until an admin creates the job.
+
+    Image only. Environment variables, arguments, the schedule, and the task timeout stay as created.
+    This does not create the job or the scheduler, and it does not touch the moderation jobs' settings.
+    """
+    described = gcloud(['run', 'jobs', 'describe', CAPTION_POLICY_JOB, '--region=' + REGION,
+                        '--format=value(metadata.name)'], optional=True)
+    if getattr(described, 'returncode', 1):
+        print(json.dumps({'job': CAPTION_POLICY_JOB, 'skipped': True, 'reason': 'not_created'}))
+        return
+    gcloud(['run', 'jobs', 'update', CAPTION_POLICY_JOB, '--region=' + REGION, '--image=' + image])
+    print(json.dumps({'job': CAPTION_POLICY_JOB, 'image': image, 'env_unchanged': True}))
 
 
 def retire_daily():
