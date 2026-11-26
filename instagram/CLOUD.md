@@ -327,8 +327,8 @@ Cloud Logging에는 `caption_policy_done` 또는 `caption_policy_failed`가 한 
 작업이 이미 있을 때 이 작업의 이미지만 바꿀 때는 `deploy`를 쓰지 않는다.
 `deploy`는 댓글 관리와 관리 보고의 이미지도 바꾼다. `instagram` 폴더에서
 `prepare`와 `build`만 하고, 빌드가 `SUCCESS`가 된 뒤 이 작업만 가리킨다.
-환경 변수, 인수, 제한 시간, 스케줄러는 그대로 둔다. `--set-env-vars`와
-`--update-env-vars`는 붙이지 않는다.
+환경 변수, 인수, 제한 시간, 스케줄러는 그대로 둔다. 환경 변수를 통째로
+바꾸거나 이번 실행용 변수를 작업에 저장하는 옵션은 붙이지 않는다.
 
 ```sh
 python3 scripts/token_connection_release.py prepare
