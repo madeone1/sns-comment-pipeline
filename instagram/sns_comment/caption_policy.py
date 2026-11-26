@@ -2,8 +2,9 @@
 
 Once a month, Gemini with Google Search grounding looks up caption, hashtag,
 Reels, and ad-copy changes. Only a grounded official Meta or Instagram source
-edits the existing Notion page. A grounded trade-press article is listed in the
-monthly report and does not change the page. The job takes
+edits the caption-rules database (and the page callout and changelog). A
+grounded trade-press article is listed in the monthly report and does not
+change the page or the database. The job takes
 ``state/caption-policy-lease.json`` and does not take the comment-moderation
 lock, so a long read does not make the half-hour moderation run defer.
 
@@ -30,6 +31,11 @@ from .cloud_state import CAPTION_POLICY_LEASE, CloudError
 PROJECT = "waterbomb-sns-pipeline"
 PAGE_ID = "32c0761a512d8214bf84819e674e6177"
 PAGE_URL = "https://app.notion.com/p/" + PAGE_ID
+RULES_DATABASE_URL = "https://app.notion.com/p/4240761a512d81479dc9e466837ec400"
+RULES_DATA_SOURCE = "collection://4240761a-512d-811b-9cdd-000babde0551"
+RULES_DATA_SOURCE_ID = "4240761a-512d-811b-9cdd-000babde0551"
+HASHTAG_CODE = "C14"
+EDITOR_PROPERTY = "마지막 수정자 / 반영 방식"
 PARENT_PAGE_ID = "26bfd25c45914b27b3af0bf98197ba5b"
 PARENT_URL = "https://app.notion.com/p/" + PARENT_PAGE_ID
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -593,18 +599,14 @@ def _apply_to_section(section, spec):
 
 
 def properties_for(page, version, today, bump):
+    """Page properties on 규정집 목록. There is no 버전 column."""
+    del version, bump
     text = page["fetch_text"]
     if "date:마지막 수정:start" in text:
         payload = {"date:마지막 수정:start": today.isoformat(), "date:마지막 수정:is_datetime": 0}
     else:
         payload = {"마지막 수정": today.isoformat()}
-    payload["마지막 수정자"] = EDITOR
-    if bump and ("버전" in page["properties"] or '"버전"' in text):
-        payload["버전"] = version
-    title = page["properties"].get("이름")
-    current = page.get("version") or ""
-    if bump and isinstance(title, str) and current and current in title:
-        payload["이름"] = title.replace(current, version, 1)
+    payload[EDITOR_PROPERTY] = EDITOR
     return payload
 
 
@@ -616,15 +618,250 @@ def _edited_day(props):
     return ""
 
 
-def plan_updates(page, findings, dropped, today):
-    """Build in-place edits. An empty content list means the rule text stays."""
+def _plain_cell(value):
+    if value is None or isinstance(value, bool):
+        return "" if not isinstance(value, str) else value.strip()
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value).strip()
+    if isinstance(value, dict):
+        if isinstance(value.get("name"), str):
+            return value["name"].strip()
+        return _plain_cell(value.get("plain_text") or value.get("text") or value.get("content"))
+    if isinstance(value, list):
+        return " ".join(_plain_cell(item) for item in value).strip()
+    return str(value).strip()
+
+
+def _active(value):
+    if value is None:
+        return True
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    text = _plain_cell(value).casefold()
+    return text in {"__yes__", "yes", "true", "1"}
+
+
+def _order_value(value):
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = _plain_cell(value)
+    try:
+        return int(float(text)) if text else 0
+    except ValueError:
+        return 0
+
+
+def parse_rule_rows(result):
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        raise PolicyError("캡션 작성 규칙 표를 읽지 못했습니다. 수정하지 않습니다.")
+    if result.get("has_more") or result.get("next_cursor"):
+        raise PolicyError("캡션 작성 규칙 표를 한 번에 읽지 못했습니다. 수정하지 않습니다.")
+    rows = []
+    for raw in result["results"]:
+        if not isinstance(raw, dict):
+            raise PolicyError("캡션 작성 규칙 표를 읽지 못했습니다. 수정하지 않습니다.")
+        rows.append({
+            "url": _plain_cell(raw.get("url")),
+            "title": _plain_cell(raw.get("규칙")),
+            "code": _plain_cell(raw.get("코드")).upper(),
+            "order": _order_value(raw.get("순서")),
+            "description": _plain_cell(raw.get("설명")),
+            "source": _plain_cell(raw.get("근거/출처")),
+            "active": _active(raw.get("사용")),
+            "history": _plain_cell(raw.get("변경 기록")),
+            "status": _plain_cell(raw.get("상태")),
+        })
+    return rows
+
+
+def load_rules(notion):
+    try:
+        result = notion.call("query-data-sources", {"data": {
+            "mode": "sql",
+            "data_source_urls": [RULES_DATA_SOURCE],
+            "query": (
+                'SELECT url, "규칙", "코드", "순서", "설명", "근거/출처", "사용", "변경 기록", "상태" '
+                'FROM "' + RULES_DATA_SOURCE + '"'
+            ),
+        }})
+    except PilotError as error:
+        if access_denied(error):
+            raise AccessError(SHARE_HINT + " 캡션 작성 규칙 데이터베이스도 같은 연결에 공유해주세요.") from None
+        raise
+    return parse_rule_rows(result)
+
+
+def _is_protected_row(row):
+    return row.get("code") == HASHTAG_CODE or has_hashtag_cap(row.get("description") or "")
+
+
+def _match_row(finding, rules):
+    if contradicts_cap(finding):
+        for row in rules:
+            if row.get("code") == HASHTAG_CODE:
+                return row
+    blob = " ".join(str(finding.get(key) or "") for key in ("claim", "old_snippet", "new_text"))
+    codes = []
+    for code in re.findall(r"\bC\d{2}\b", blob):
+        if code not in codes:
+            codes.append(code)
+    if len(codes) == 1:
+        for row in rules:
+            if row.get("code") == codes[0]:
+                return row
+    old = finding.get("old_snippet") or ""
+    if len(old) >= 8:
+        hits = [row for row in rules if old in ((row.get("description") or "") + "\n" + (row.get("title") or ""))]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
+def _next_identifiers(rules):
+    numbers = []
+    orders = []
+    for row in rules:
+        orders.append(int(row.get("order") or 0))
+        match = re.fullmatch(r"C(\d{2})", row.get("code") or "")
+        if match:
+            numbers.append(int(match.group(1)))
+    code_n = (max(numbers) if numbers else 0) + 1
+    order_n = (max(orders) if orders else 0) + 1
+    if code_n > 99:
+        raise PolicyError("규칙 코드가 99를 넘어 새 행을 만들지 않습니다.")
+    return code_n, order_n
+
+
+def _history_line(today, finding, prefix):
+    return today.isoformat() + " " + prefix + finding["claim"] + " (" + finding["source_url"] + ")"
+
+
+def _source_text(row, finding):
+    source = row.get("source") or ""
+    extra = finding["source_date"].isoformat() + " " + finding["source_url"]
+    if finding["source_url"] not in source:
+        source = (source + " " + extra).strip()
+    if _is_protected_row(row) and PROTECTED_SOURCE not in source:
+        source = (source + " " + PROTECTED_SOURCE).strip()
+    return source
+
+
+def plan_rule_changes(findings, rules, today):
+    """Official findings become database writes. Rows are never deleted."""
+    writes, applied, skipped = [], [], []
+    code_n, order_n = _next_identifiers(rules)
+    for finding in findings:
+        if finding.get("kind") != "official":
+            skipped.append({"reason": "unsourced", "source_url": finding.get("source_url"), "claim": finding.get("claim")})
+            continue
+        row = _match_row(finding, rules)
+        cap_edit = contradicts_cap(finding) or (
+            finding.get("old_snippet") and has_hashtag_cap(finding["old_snippet"])
+            and not has_hashtag_cap(finding["new_text"]))
+        protected = (row and _is_protected_row(row)) or cap_edit
+        if protected and not cap_change_allowed(finding):
+            skipped.append({"reason": "protected_hashtag_rule", "source_url": finding["source_url"], "claim": finding["claim"]})
+            continue
+        if finding["action"] == "remove":
+            if row is None:
+                skipped.append({"reason": "snippet_not_unique", "source_url": finding["source_url"], "claim": finding["claim"]})
+                continue
+            if _is_protected_row(row) and not (contradicts_cap(finding) and cap_change_allowed(finding)):
+                skipped.append({"reason": "protected_hashtag_rule", "source_url": finding["source_url"], "claim": finding["claim"]})
+                continue
+            history = (row.get("history") or "").strip()
+            line = _history_line(today, finding, "사용 해제. ")
+            if line not in history:
+                history = (history + "\n" + line).strip()
+            writes.append({
+                "op": "retire", "page_id": row["url"], "code": row["code"],
+                "cap_allowed": bool(contradicts_cap(finding) and cap_change_allowed(finding)),
+                "properties": {"사용": "__NO__", "변경 기록": history, "근거/출처": _source_text(row, finding)},
+            })
+            applied.append({**finding, "code": row["code"]})
+            continue
+        if any(contains_text((item.get("description") or "") + " " + (item.get("title") or ""), finding["new_text"]) for item in rules):
+            skipped.append({"reason": "already_present", "source_url": finding["source_url"], "claim": finding["claim"]})
+            continue
+        if row:
+            history = (row.get("history") or "").strip()
+            line = _history_line(today, finding, "")
+            if line not in history:
+                history = (history + "\n" + line).strip()
+            writes.append({
+                "op": "update", "page_id": row["url"], "code": row["code"], "cap_allowed": bool(cap_edit and cap_change_allowed(finding)),
+                "properties": {"설명": finding["new_text"], "근거/출처": _source_text(row, finding), "변경 기록": history},
+            })
+            applied.append({**finding, "code": row["code"]})
+            continue
+        if cap_edit:
+            skipped.append({"reason": "snippet_not_unique", "source_url": finding["source_url"], "claim": finding["claim"]})
+            continue
+        code = "C" + str(code_n).zfill(2)
+        code_n += 1
+        order = order_n
+        order_n += 1
+        writes.append({
+            "op": "create", "code": code, "cap_allowed": False,
+            "properties": {
+                "규칙": finding["claim"][:80],
+                "코드": code,
+                "순서": order,
+                "설명": finding["new_text"],
+                "근거/출처": finding["source_date"].isoformat() + " " + finding["source_url"],
+                "사용": "__YES__",
+                "상태": "사용 중",
+                "변경 기록": _history_line(today, finding, "추가. "),
+                "date:추가일:start": today.isoformat(),
+                "date:추가일:is_datetime": 0,
+            },
+        })
+        applied.append({**finding, "code": code})
+    _guard_rule_writes(writes, rules)
+    return writes, applied, skipped
+
+
+def _guard_rule_writes(writes, rules):
+    by_url = {row.get("url"): row for row in rules}
+    for change in writes:
+        if change["op"] == "create":
+            if change["properties"].get("사용") == "__NO__":
+                raise PolicyError("새 규칙을 끈 상태로 만들지 않습니다.")
+            continue
+        row = by_url.get(change.get("page_id"))
+        if not row:
+            raise PolicyError("고칠 규칙 행을 찾지 못했습니다.")
+        props = change["properties"]
+        if not (_is_protected_row(row) or row.get("code") == HASHTAG_CODE):
+            continue
+        if props.get("사용") == "__NO__" and not change.get("cap_allowed"):
+            raise PolicyError("해시태그 최대 5개 규칙을 끄지 않습니다.")
+        new_desc = props.get("설명", row.get("description") or "")
+        if has_hashtag_cap(row.get("description") or "") and not has_hashtag_cap(new_desc):
+            if not contradicts_cap({"claim": new_desc, "new_text": "", "old_snippet": ""}):
+                raise PolicyError("해시태그 최대 5개 규칙이 빠져 수정하지 않습니다.")
+        source = props.get("근거/출처", row.get("source") or "")
+        if PROTECTED_SOURCE in (row.get("source") or "") and PROTECTED_SOURCE not in source:
+            raise PolicyError("해시태그 규칙의 기존 출처가 빠져 수정하지 않습니다.")
+
+
+def plan_updates(page, findings, dropped, today, rules=None):
+    """Build page edits. Rule text lives in the rules database, not in section bullets."""
     content = page["content"]
     version = current_version(content, page["properties"])
     if not version:
         raise PolicyError("규정집 버전을 확인하지 못했습니다.")
     page = {**page, "version": version}
     sections, numbers = parse_sections(content)
-    applied, skipped = [], list(dropped)
+    skipped = list(dropped)
     reported, editable = [], []
     for finding in findings:
         if finding.get("kind") == "trade":
@@ -633,22 +870,8 @@ def plan_updates(page, findings, dropped, today):
             editable.append(finding)
         else:
             skipped.append({"reason": "unsourced", "source_url": finding.get("source_url"), "claim": finding.get("claim")})
-    grouped = {}
-    for finding in editable:
-        decision = _decide(finding, content)
-        if decision["skip"]:
-            skipped.append({"reason": decision["skip"], "source_url": finding["source_url"], "claim": finding["claim"]})
-            continue
-        number = section_for(finding, sections) if sections else None
-        if number is None:
-            raise PolicyError("반영할 섹션을 찾지 못해 수정하지 않습니다.")
-        bucket = grouped.setdefault(number, {"replacements": [], "bullets": [], "findings": []})
-        if decision["replacement"]:
-            bucket["replacements"].append(decision["replacement"])
-        if decision["bullet"]:
-            bucket["bullets"].append(decision["bullet"])
-        bucket["findings"].append(finding)
-        applied.append({**finding, "section_number": number, "section_title": sections[number]["title"]})
+    rule_changes, applied, rule_skipped = plan_rule_changes(editable, list(rules or []), today)
+    skipped.extend(rule_skipped)
     report = korean_report(today, applied, skipped, version, bump_minor(version) if applied else version, reported)
     if not applied:
         repair = AUTO_MARK in content and today.isoformat() in content and _edited_day(page["properties"]) != today.isoformat()
@@ -657,7 +880,7 @@ def plan_updates(page, findings, dropped, today):
         return {
             "version": version, "next_version": version, "content_updates": [], "applied": [],
             "reported": reported, "skipped": skipped, "report": report, "properties": {},
-            "repair_properties": repair,
+            "repair_properties": repair, "rule_changes": [],
         }
     if sorted(set(numbers)) != list(range(1, 9)) or len(numbers) != len(set(numbers)):
         raise PolicyError("1부터 8까지 섹션을 확인하지 못해 수정하지 않습니다.")
@@ -669,14 +892,9 @@ def plan_updates(page, findings, dropped, today):
     updates = []
     old_callout, new_callout = _rewrite_callout(content, version, nxt, today, urls)
     updates.append({"old_str": old_callout, "new_str": new_callout})
-    summary = "; ".join(item["new_text"] for item in applied)[:180]
+    summary = "; ".join(item["code"] + " " + item["new_text"] for item in applied)[:180]
     for number, section in sections.items():
-        spec = grouped.get(number)
         updated = section["text"]
-        if spec:
-            texts = [item["new_text"] for item in spec["findings"]]
-            spec = {**spec, "today": today, "summary": "; ".join(texts)[:180]}
-            updated = _apply_to_section(updated, spec)
         if number == 8:
             old_table, new_table = _append_table(updated, today, nxt, summary + " (" + AUTO_MARK + ")", urls)
             if updated.count(old_table) != 1:
@@ -691,7 +909,7 @@ def plan_updates(page, findings, dropped, today):
     return {
         "version": version, "next_version": nxt, "content_updates": updates, "applied": applied,
         "reported": reported, "skipped": skipped, "report": report, "repair_properties": False,
-        "properties": properties_for(page, nxt, today, True),
+        "properties": properties_for(page, nxt, today, True), "rule_changes": rule_changes,
     }
 
 
@@ -748,7 +966,7 @@ def korean_report(today, applied, skipped, current, nxt, reported=None):
             lines.append("- " + item["claim"] + " (" + item["source_date"].isoformat() + ", " + item["source_url"] + ")")
         lines.extend(["", "규정집 반영", "- " + current + " → " + nxt])
         for item in applied:
-            lines.append("- " + str(item["section_number"]) + ". " + item["section_title"] + ": " + item["new_text"])
+            lines.append("- " + item.get("code", "") + ": " + item["new_text"])
     if reported:
         lines.extend(["", "업계 매체 보도"])
         for item in reported:
@@ -763,6 +981,22 @@ def korean_report(today, applied, skipped, current, nxt, reported=None):
     if unsourced:
         lines.extend(["", "출처나 날짜가 없는 주장 " + str(len(unsourced)) + "건은 반영하지 않았습니다."])
     return "\n".join(lines)
+
+
+def apply_rule_changes(notion, changes, sleeper):
+    """Create or update rule rows. Nothing here deletes a row."""
+    for change in changes:
+        if change["op"] == "create":
+            _checked(notion, notion.call("create-pages", {
+                "parent": {"type": "data_source_id", "data_source_id": RULES_DATA_SOURCE_ID},
+                "pages": [{"properties": change["properties"]}],
+                "allow_async": False,
+            }), "규칙 추가", sleeper)
+            continue
+        _checked(notion, notion.call("update-page", {
+            "page_id": change["page_id"], "command": "update_properties",
+            "properties": change["properties"], "allow_async": False,
+        }), "규칙 수정", sleeper)
 
 
 def _checked(notion, result, action, sleeper):
@@ -880,7 +1114,8 @@ def _execute(notion, transport, now, dry_run, researcher, sleeper):
         raise PolicyError("읽은 페이지가 캡션 규정집이 아닙니다. 다른 페이지는 수정하지 않습니다.")
     if not current_version(page["content"], page["properties"]):
         raise PolicyError("규정집 버전을 확인하지 못했습니다.")
-    if not has_hashtag_cap(page["content"]):
+    rules = load_rules(notion)
+    if not has_hashtag_cap(page["content"]) and not any(has_hashtag_cap(row.get("description") or "") for row in rules):
         log("caption_policy_hashtag_rule_unseen", severity="WARNING",
             message="해시태그 최대 5개 문장을 찾지 못했습니다. 그 규칙은 바꾸지 않습니다.")
     readable = parent_readable(notion)
@@ -892,16 +1127,18 @@ def _execute(notion, transport, now, dry_run, researcher, sleeper):
     else:
         raw, metadata = researcher(start, end)
     kept, dropped = keep_findings(raw, metadata, start, end)
-    plan = plan_updates(page, kept, dropped, end)
+    plan = plan_updates(page, kept, dropped, end, rules)
     report = plan["report"]
     if dry_run:
         report = report + "\n\n미리보기입니다. 노션은 수정하지 않았습니다."
         log("caption_policy_done", severity="INFO", outcome="dry_run", version=plan["version"],
             next_version=plan["next_version"], applied=len(plan["applied"]),
             reported=len(plan.get("reported") or []), dropped=len(dropped),
-            report=report, parent_readable=readable)
+            report=report, parent_readable=readable, rules=len(plan.get("rule_changes") or []))
         return 0
     channel = ""
+    if plan["rule_changes"]:
+        apply_rule_changes(notion, plan["rule_changes"], sleeper)
     if plan["content_updates"]:
         _checked(notion, notion.call("update-page", {
             "page_id": PAGE_URL, "command": "update_content", "content_updates": plan["content_updates"],
@@ -926,6 +1163,7 @@ def _execute(notion, transport, now, dry_run, researcher, sleeper):
     log("caption_policy_done", severity="INFO", outcome=outcome, version=plan["version"],
         next_version=plan["next_version"], applied=len(plan["applied"]),
         reported=len(plan.get("reported") or []), dropped=len(dropped),
+        rules=len(plan.get("rule_changes") or []),
         report_channel=channel, report=report, parent_readable=readable)
     return 0
 
